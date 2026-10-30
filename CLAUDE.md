@@ -375,6 +375,15 @@ at 13.9 GiB. Worst-case utterance latency while a block generates is 1.8 s, and 
 takes 5–8 s. IQ4_XS also squeezes in beside whisper, but with only 0.33 GiB to spare and
 no room for MTP, so it is not offered on one 16 GB card.
 
+**One card, even when there are several.** The target is a single 16 GB card. Where a
+machine has more than one NVIDIA GPU, put **both** servers on the one with the most VRAM —
+`--device` for llama-server, `-dev` for whisper-server — and never split them across cards.
+The operator decided this on 2026-10-30 so that the app behaves the same wherever it is
+deployed. A two-card split measured better (`BUILD_NOTES.md` §2, layout B), but it is not
+supported. Choose the card **by name and VRAM, never by index**: CUDA and `nvidia-smi`
+number the cards differently, and both servers default to CUDA device 0, which on the dev
+machine is the 10 GB card.
+
 **Lifecycle.** Start loads whisper-server and llama-server in parallel, with the message
 *"Loading models (up to a minute)…"*. **Then warm whisper up** with one inference on a
 short noise clip before going live. On a GPU the CUDA build has no native kernels for

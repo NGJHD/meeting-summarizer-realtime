@@ -100,6 +100,9 @@ utterance is closed.**
    and whisper never contends with the LLM. CLAUDE.md §0.4 assumes one card. Whether to
    support this layout is an open question for the operator. If yes: whisper on the card
    with less VRAM, the LLM on the largest one, chosen by name, not index.
+   **Decided 2026-10-30: not supported.** The app targets one 16 GB card so it behaves the
+   same wherever it is deployed. On a multi-GPU machine both servers go to the largest card
+   (CLAUDE.md §8).
 5. **`WHISPER_RESERVE_GIB` ≈ 1.9** — large-v3-turbo resident with CUDA context and
    buffers, measured on the 3080 in B (2,255 − 379 MiB baseline).
 6. **Blocks are cheap.** ~1,000–1,250 prompt tokens and 150–350 output tokens per
