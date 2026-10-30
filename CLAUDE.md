@@ -370,8 +370,17 @@ server is not ours: never started or killed by us, and its VRAM is not ours to b
 to load or `nvidia-smi` shows less free memory than `WHISPER_RESERVE_GIB`, say *"Not enough
 video memory for transcription alongside the model on port N."* Never let the app hang.
 
+**Measured (`BUILD_NOTES.md` §2):** on a single 16 GB card, IQ3_XXS + MTP + whisper peaks
+at 13.9 GiB. Worst-case utterance latency while a block generates is 1.8 s, and a block
+takes 5–8 s. IQ4_XS also squeezes in beside whisper, but with only 0.33 GiB to spare and
+no room for MTP, so it is not offered on one 16 GB card.
+
 **Lifecycle.** Start loads whisper-server and llama-server in parallel, with the message
-*"Loading models (up to a minute)…"*. Stop keeps both loaded for `llm.idle_timeout_s`
+*"Loading models (up to a minute)…"*. **Then warm whisper up** with one inference on a
+short noise clip before going live. On a GPU the CUDA build has no native kernels for
+(compute 12.0 against the CUDA 12.4 build), the first inference JIT-compiles for about a
+minute. Without a warm-up, the first utterance of the first meeting arrives a minute late
+and everything queues behind it. Stop keeps both loaded for `llm.idle_timeout_s`
 (300), so pressing Start again is instant. After that, both exit and the VRAM is released.
 Closing the app kills both, always (§12).
 

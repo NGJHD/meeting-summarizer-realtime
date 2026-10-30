@@ -29,6 +29,7 @@ tools/*
 !tools/make_release.py
 !tools/check_release.py
 !tools/jscheck.py
+!tools/spike.py
 work/
 
 # ---- editor / OS noise ---------------------------------------------------
