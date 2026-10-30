@@ -1,0 +1,170 @@
+r"""Build the two release assets. Development only; not shipped.
+
+    runtime/python.exe tools/make_release.py
+
+A release carries two zips and they are not variants of the same thing:
+
+  Meeting-Summariser-vX.Y.Z.zip        the source tree, ~190 KB
+  Meeting-Summariser-vX.Y.Z-full.zip   the same plus runtime\, bin\ and the small models, ~1.47 GB
+
+The small one is the **update payload** -- what the in-app updater downloads and
+robocopies over an install. It must stay small and must never contain
+`runtime\python.exe`: the updater would be overwriting the interpreter the
+running app is executing from, and a half-copied interpreter cannot start, so
+it cannot self-repair. `version.pick_asset` skips anything with `-full` in the
+name for exactly that reason.
+
+The full one is for a **first install**: unzip it and only the three large
+models are left to download. Everything in it is the set that was actually
+tested, rather than whatever the pinned URLs happen to serve later.
+
+The three large models are never bundled -- see BUNDLED_FILES below for which
+ones do travel and why.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from server import version  # noqa: E402
+
+PREFIX = "Meeting-Summariser"
+BUNDLED_DIRS = ("runtime", "bin")
+
+# The models small enough to travel, named individually -- `models\` as a whole
+# is 25 GB. The first three are 103 MB and they carry their weight twice over:
+# they are also the only downloads that were never pinned to immutable bytes
+# (sherpa-onnx publishes them on floating release tags), and the segmentation
+# one arrives as a tar.bz2 that has to be unpacked and renamed. Shipping them
+# retires the most fragile step in DOWNLOAD_MODELS.bat.
+#
+# The aligner is 360 MB raw but deflates to 220 MB, taking the bundle from
+# 1.24 GB to about 1.47 GB -- still clear of GitHub's 2 GB per-asset limit.
+# It is worth the space: it is exported by us from torchaudio (no .onnx is
+# published anywhere), so the alternative is self-hosting it as yet another
+# release asset that a first install has to fetch separately.
+#
+# Whisper large-v3-turbo is deliberately not here. It compresses to 1.42 GB,
+# which would take the bundle past the limit.
+BUNDLED_FILES = (
+    "models/ggml-silero-v5.1.2.bin",
+    "models/segmentation-3.0.onnx",
+    "models/speaker-embedding.onnx",
+    "models/wav2vec2-align.onnx",
+    "models/wav2vec2-align.json",
+)
+SKIP_PARTS = {"__pycache__"}
+# This script is tracked so that a release is reproducible from the repository,
+# but it is development tooling and has no business in an install.
+EXCLUDE_PREFIXES = ("tools/",)
+
+
+def source_entries() -> list:
+    """Every tracked file, so the zip matches the commit rather than the disk."""
+    out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
+                         text=True, check=True)
+    return [line for line in out.stdout.splitlines()
+            if line.strip() and not line.startswith(EXCLUDE_PREFIXES)]
+
+
+def write(target: Path, extras: bool) -> None:
+    files = source_entries()
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        for rel in files:
+            src = ROOT / rel
+            if src.is_file():
+                z.write(src, "%s/%s" % (PREFIX, rel))
+        if not extras:
+            return
+        for folder in BUNDLED_DIRS:
+            base = ROOT / folder
+            if not base.is_dir():
+                raise SystemExit("missing %s -- run DOWNLOAD_MODELS.bat first" % folder)
+            for src in base.rglob("*"):
+                if not src.is_file() or SKIP_PARTS & set(src.parts):
+                    continue
+                z.write(src, "%s/%s" % (PREFIX, src.relative_to(ROOT).as_posix()))
+        for rel in BUNDLED_FILES:
+            src = ROOT / rel
+            if not src.is_file():
+                raise SystemExit("missing %s -- run DOWNLOAD_MODELS.bat first" % rel)
+            z.write(src, "%s/%s" % (PREFIX, rel))
+
+
+def check_shippable_config() -> None:
+    r"""Refuse to build if config.json carries this machine's local state.
+
+    config.json is tracked -- it is the default a new install gets -- and the
+    app also writes to it: choosing Port in the Model dropdown sets
+    `llm.external` (CLAUDE.md section 13.3). So anyone who runs the app while
+    developing dirties the file, and `git add -A` ships it.
+
+    That happened. 1.2.0 through 1.2.2 shipped `external.enabled: true`, so
+    every fresh install defaulted to a llama-server on port 9931 that was not
+    running on that machine, and failed only after transcription and
+    diarization had already been paid for. Existing installs were spared purely
+    because version.PRESERVE keeps config.json across an update.
+
+    This fails the build rather than quietly normalising the file: the working
+    tree and the zip should not disagree about what was shipped.
+    """
+    cfg = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+    external = (cfg.get("llm") or {}).get("external") or {}
+    if external.get("enabled"):
+        raise SystemExit(
+            "config.json has llm.external.enabled = true. "
+            "That is this machine's Port selection, not a shippable "
+            "default. Set it to false, or pick High or Low Quality in the "
+            "app, then rebuild."
+        )
+    # The Output dropdown is the second thing the UI writes here, and it
+    # dirties the file the same way -- but this one is reset rather than
+    # refused. llm.external.enabled shipped wrong breaks a fresh install an
+    # hour into a job (9am); ui.mode shipped wrong preselects a dropdown the
+    # user can change, and failing the build over that would stop a release
+    # every time somebody tested Minutes. Section 13.2 has the default at
+    # "Summary & Minutes", so it is set back here.
+    #
+    # The file on disk is what changes, not just the copy in the zip: the
+    # working tree and the zip should not disagree about what was shipped.
+    # Said out loud, because a build that silently edits tracked files is
+    # worse than one that refuses.
+    mode = (cfg.get("ui") or {}).get("mode", "both")
+    if mode != "both":
+        cfg.setdefault("ui", {})["mode"] = "both"
+        (ROOT / "config.json").write_text(
+            json.dumps(cfg, indent=2) + '\n', encoding="utf-8")
+        print("config.json: ui.mode was %r, reset to \"both\" for the release"
+              % mode)
+
+
+def main() -> None:
+    check_shippable_config()
+    v = version.APP_VERSION
+    out = ROOT.parent
+    plain = out / ("%s-v%s.zip" % (PREFIX, v))
+    full = out / ("%s-v%s-full.zip" % (PREFIX, v))
+
+    for target, extras in ((plain, False), (full, True)):
+        print("building %s ..." % target.name)
+        if target.exists():
+            target.unlink()
+        write(target, extras)
+        size = target.stat().st_size
+        print("  %d bytes (%.2f GB)" % (size, size / 1e9))
+        if size > 2_000_000_000:
+            raise SystemExit("%s exceeds GitHub's 2 GB per-asset limit" % target.name)
+
+    print("\nassets for v%s:" % v)
+    print("  %s   <- update payload, what pick_asset chooses" % plain.name)
+    print("  %s   <- first install" % full.name)
+
+
+if __name__ == "__main__":
+    main()

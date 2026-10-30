@@ -1,0 +1,40 @@
+# Meeting Transcriber Live — what does NOT belong in the repository.
+#
+# The app ships as an unzipped folder containing GBs of binaries and model
+# weights. None of that is source. The repo holds the orchestration code, the
+# prompt and the frontend; DOWNLOAD_MODELS.bat fetches everything else.
+
+# ---- shipped payload, fetched by DOWNLOAD_MODELS.bat --------------------
+bin/
+models/
+runtime/
+
+# ---- produced at runtime ------------------------------------------------
+# job.log and the running lock only -- never transcript content (CLAUDE.md §10).
+temp/
+*.partial
+
+# Written by run.bat, pointing at whichever port it settled on.
+*.url
+
+# Written by the update script and the writable-folder probe.
+update.log
+.write-probe-*
+
+# ---- development only, not shipped --------------------------------------
+# `tools/` is a scratch area for test audio and one-off scripts. Test audio is
+# real meeting audio and must never be committed (CLAUDE.md §10). The release
+# scripts and the JS checker are the exceptions.
+tools/*
+!tools/make_release.py
+!tools/check_release.py
+!tools/jscheck.py
+work/
+
+# ---- editor / OS noise ---------------------------------------------------
+__pycache__/
+*.py[cod]
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
