@@ -150,6 +150,21 @@ input.port { width: 96px; }
 }
 .iconbtn:hover { background: rgba(255, 255, 255, 0.08); color: var(--ink); }
 
+/* Microphone level, directly under the Microphone dropdown: moves with the sound
+   the selected mic hears, before Start too, so the mic can be checked first. */
+.field { position: relative; }
+.meter {
+  position: absolute; left: 2px; right: 2px; bottom: -8px;
+  display: block; height: 4px; border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08); overflow: hidden;
+}
+.meter span {
+  display: block; height: 100%; width: 0; border-radius: 2px;
+  background: linear-gradient(90deg, var(--mint-deep), var(--mint));
+  box-shadow: 0 0 8px rgba(127, 209, 199, 0.6);
+  transition: width 0.2s linear, opacity 0.2s linear;
+}
+
 .status { display: flex; align-items: center; gap: 9px; padding-bottom: 8px; min-width: 0; }
 #status-text { color: var(--ink-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-faint); flex: none; }
@@ -274,15 +289,6 @@ input.port { width: 96px; }
 }
 .col-title { font-weight: 600; color: var(--ink-soft); }
 .view-name { color: var(--ink-soft); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-/* The listening line: the mic level as a glow along the transcript's top edge. */
-.aura { position: absolute; left: 0; right: 0; top: 0; height: 2px; pointer-events: none; }
-.aura span {
-  display: block; height: 100%; width: 0; margin: 0 auto; border-radius: 2px;
-  background: linear-gradient(90deg, transparent, var(--mint), #b9a8ff, var(--mint), transparent);
-  box-shadow: 0 0 14px 2px rgba(127, 209, 199, 0.55);
-  transition: width 0.2s linear, opacity 0.2s linear;
-}
 
 .tabs { display: flex; gap: 4px; padding: 3px; border-radius: 11px; background: rgba(0, 0, 0, 0.15); }
 .tab {

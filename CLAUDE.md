@@ -673,9 +673,10 @@ it must be readable from a chair away and must not flicker.
 3. **Start / Stop** button — one button, two states. Disabled while models load.
 4. **Status** — *Loading models…* / *Listening* / *Stopped* / an error sentence, plus elapsed
    session time.
-5. **Level meter** — a glowing line along the top edge of the transcript pane, driven by
-   §4's RMS. It is live whenever a microphone is selected, including before Start, so the
-   user can check the mic first.
+5. **Level meter** — a thin bar directly under the Microphone dropdown, driven by §4's RMS.
+   It is live whenever a microphone is selected, including before Start, so the user can
+   check the mic first. (It was briefly a glow along the transcript's top edge; the
+   operator could not tell what it was, so it sits by the control it describes.)
 6. **About** — version, repository, *Check for updates* (kept from the batch app).
 
 **Body: two columns.**
