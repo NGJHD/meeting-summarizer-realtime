@@ -3,23 +3,22 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
 rem ---------------------------------------------------------------------------
-rem  Meeting Summariser - model downloader
+rem  Meeting Transcriber Live - model and binary downloader
 rem
-rem  Run this ONCE on a machine that has internet access, then copy the whole
-rem  folder to the offline machine. The application itself never touches the
-rem  network; this script exists only so the models do not have to ship inside
-rem  the folder.
+rem  Run this ONCE on a machine that has internet access. The application
+rem  itself never touches the network (apart from the Check for updates button);
+rem  this script exists only so the models do not have to ship inside the folder.
 rem
 rem  Needs curl.exe and tar.exe, both included with Windows 10 1803 and later.
 rem ---------------------------------------------------------------------------
 
 echo.
-echo   Meeting Summariser - downloading models
-echo   ---------------------------------------
+echo   Meeting Transcriber Live - downloading models
+echo   ---------------------------------------------
 echo.
-echo   Total download: about 28 GB - the Python runtime, ffmpeg, 6 models
-echo   and the inference binaries for every graphics vendor.
-echo   This will take a while.
+echo   Total download: about 28 GB - the Python runtime, ffmpeg, the speech
+echo   recognition and voice detection models, two language models and the
+echo   NVIDIA inference binaries. This will take a while.
 echo   Already-downloaded files are skipped, so it is safe to re-run
 echo   this script if the connection drops.
 echo.
@@ -29,8 +28,7 @@ if not exist "models" mkdir "models"
 where curl.exe >nul 2>&1
 if errorlevel 1 (
   echo   ERROR: curl.exe was not found.
-  echo   It ships with Windows 10 version 1803 and later. On an older
-  echo   version, download the five files listed in BUILD_NOTES.md by hand.
+  echo   It ships with Windows 10 version 1803 and later.
   echo.
   pause
   exit /b 1
@@ -38,102 +36,46 @@ if errorlevel 1 (
 
 set "FAILED="
 
-rem  Every URL below is pinned to an exact revision -- a HuggingFace commit SHA
-rem  or a GitHub release tag -- never to a branch head. `resolve/main` would let
-rem  an upstream re-upload silently hand a new machine different weights from
-rem  the ones every measurement in BUILD_NOTES.md was taken against, and the
-rem  size check would not catch it. To move to a newer model, change the SHA
-rem  here deliberately and re-measure.
+rem  Every URL below is pinned to an exact revision -- a HuggingFace commit SHA,
+rem  a GitHub release tag or a git tag -- never to a branch head, so a new
+rem  machine gets the same bytes every measurement in BUILD_NOTES.md was taken
+rem  against. To move to a newer model, change the pin deliberately and re-measure.
 rem
 rem  get <target file> <minimum size in bytes> <url> <description>
 call :get "models\ggml-large-v3-turbo.bin" 1500000000 ^
   "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo.bin?download=true" ^
   "Speech recognition model - 1.6 GB"
 
+rem  Two copies of Silero VAD v5, in two formats, for two jobs. The ONNX one is
+rem  our own live segmenter (CLAUDE.md section 5); the ggml one is whisper's
+rem  own VAD on the refine pass (section 6.1).
+call :get "models\silero_vad.onnx" 2000000 ^
+  "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx" ^
+  "Voice detection model - 2 MB"
+
 call :get "models\ggml-silero-v5.1.2.bin" 800000 ^
   "https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v5.1.2.bin?download=true" ^
-  "Voice activity detector - 1 MB"
+  "Voice detection model for the second pass - 1 MB"
 
-call :get "models\speaker-embedding.onnx" 90000000 ^
-  "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_large.onnx" ^
-  "Speaker embedding model - 97 MB"
-
-rem  Forced alignment. torchaudio's WAV2VEC2_ASR_BASE_960H exported to ONNX by
-rem  tools\export_align_onnx.py -- torchaudio ships no .onnx, so like the
-rem  Vulkan whisper build this is hosted on our own releases. English only; the
-rem  app skips the stage for any other language rather than aligning to the
-rem  wrong phonemes. Without it the pipeline still runs on whisper's own DTW
-rem  timings, which is what shipped before 1.2.0.
-call :get_optional "models\wav2vec2-align.onnx" 350000000 ^
-  "https://github.com/NGJHD/Meeting-Summarizer/releases/download/align-wav2vec2-base-960h/wav2vec2-align.onnx" ^
-  "Word alignment model - 360 MB"
-
-call :get_optional "models\wav2vec2-align.json" 200 ^
-  "https://github.com/NGJHD/Meeting-Summarizer/releases/download/align-wav2vec2-base-960h/wav2vec2-align.json" ^
-  "Word alignment labels - 1 KB"
-
-rem  Both language models ship: the app picks by VRAM at startup and the UI
-rem  lets the user override, so either may be selected on any machine.
+rem  Low Quality runs live, beside whisper. High Quality writes the full
+rem  summary once whisper has been unloaded; without it the summary falls back
+rem  to Low Quality, so it is optional.
 call :get "models\Qwen3.8-27B-UD-IQ3_XXS.gguf" 10000000000 ^
   "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-IQ3_XXS.gguf?download=true" ^
   "Language model, Low Quality - 10.9 GB"
 
-call :get "models\Qwen3.8-27B-UD-IQ4_XS.gguf" 14000000000 ^
+call :get_optional "models\Qwen3.8-27B-UD-IQ4_XS.gguf" 14000000000 ^
   "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-IQ4_XS.gguf?download=true" ^
   "Language model, High Quality - 14.3 GB, this is the long one"
 
-rem  The speaker segmentation model is only published inside an archive.
-if exist "models\segmentation-3.0.onnx" (
-  echo   [skip] Speaker segmentation model - already present
-) else (
-  echo   [....] Speaker segmentation model ^(7 MB^)
-  curl.exe -L --fail --retry 5 --retry-delay 5 -# ^
-    -o "models\_segmentation.tar.bz2" ^
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
-  if errorlevel 1 (
-    echo   [FAIL] Speaker segmentation model
-    set "FAILED=1"
-  ) else (
-    tar -xf "models\_segmentation.tar.bz2" -C "models"
-    if exist "models\sherpa-onnx-pyannote-segmentation-3-0\model.onnx" (
-      copy /Y "models\sherpa-onnx-pyannote-segmentation-3-0\model.onnx" ^
-              "models\segmentation-3.0.onnx" >nul
-      rmdir /S /Q "models\sherpa-onnx-pyannote-segmentation-3-0"
-      del /Q "models\_segmentation.tar.bz2"
-      echo   [ ok ] Speaker segmentation model
-    ) else (
-      echo   [FAIL] Speaker segmentation model - archive did not contain model.onnx
-      set "FAILED=1"
-    )
-  )
-)
-
 rem ---------------------------------------------------------------------------
-rem  Inference binaries, one folder per backend.
+rem  The Python runtime, ffmpeg and the NVIDIA inference binaries.
 rem
-rem  Every backend is downloaded, not just the one this machine needs: the
-rem  folder is meant to be copied to a different computer, and picking the
-rem  wrong set at download time would only be discovered over there. Together
-rem  they add about 1.1 GB against 29 GB of models, which is not worth a
-rem  choice the user could get wrong.
-rem
-rem  whisper-vulkan is the odd one out. whisper.cpp publishes no Vulkan binary
-rem  for Windows at all, so that one is built from source -- the recipe is in
-rem  BUILD_NOTES.md section 9o -- and hosted on this project's own releases so
-rem  nobody has to install a C++ toolchain to get it. Without it a machine with
-rem  no NVIDIA card still works, but transcription drops to the CPU build and
-rem  costs roughly 5-10x on that stage.
+rem  The runtime is the batch Meeting Summariser's assembled environment (exact
+rem  CPython + exact wheels, no pip at install time), hosted on that project's
+rem  releases: it already carries everything this app needs -- fastapi, uvicorn,
+rem  numpy, onnxruntime. ffmpeg is the LGPL build, pinned to a dated release.
 rem ---------------------------------------------------------------------------
-
-rem  The Python runtime and ffmpeg. Neither is in the repository and neither
-rem  came from anywhere until now -- a fresh clone had no way to obtain them,
-rem  which made a first install impossible. The runtime is this project's own
-rem  assembled environment (exact CPython + exact wheel versions, no pip at
-rem  install time); ffmpeg comes from upstream, pinned to a dated build.
-rem
-rem  The LGPL ffmpeg is chosen deliberately over the GPL one. It decodes
-rem  everything the app accepts and still has libmp3lame for the speaker
-rem  clips, and it keeps the distributed folder far simpler to pass on.
 
 call :getzip "runtime" "runtime\python.exe" 80000000 ^
   "https://github.com/NGJHD/Meeting-Summarizer/releases/download/runtime-cpython-3.12.14/runtime-cpython.zip" ^
@@ -145,45 +87,32 @@ set "LLAMA_BUILD=b10852"
 set "WHISPER_BUILD=b4938"
 set "GH=https://github.com/ggml-org"
 
-call :getbin "llama-cuda"   90000000  ^
+call :getbin "llama-cuda" "llama-server.exe" 90000000 ^
   "%GH%/llama.cpp/releases/download/%LLAMA_BUILD%/llama-%LLAMA_BUILD%-bin-win-cuda-12.4-x64.zip" ^
   "llama.cpp for NVIDIA - 254 MB"
 
-call :getbin "llama-vulkan" 20000000  ^
-  "%GH%/llama.cpp/releases/download/%LLAMA_BUILD%/llama-%LLAMA_BUILD%-bin-win-vulkan-x64.zip" ^
-  "llama.cpp for AMD and Intel - 36 MB"
-
-call :getbin "llama-cpu"    10000000  ^
-  "%GH%/llama.cpp/releases/download/%LLAMA_BUILD%/llama-%LLAMA_BUILD%-bin-win-cpu-x64.zip" ^
-  "llama.cpp without a GPU - 18 MB"
-
-call :getbin "whisper-cuda" 300000000 ^
+rem  The whole zip is kept: whisper-server.exe is in it, and it is what this app
+rem  runs. A copy made from the batch app has whisper-cli.exe only, which is why
+rem  whisper-server.exe is what is looked for.
+call :getbin "whisper-cuda" "whisper-server.exe" 300000000 ^
   "%GH%/whisper.cpp/releases/download/%WHISPER_BUILD%/whisper-cublas-12.4.0-bin-x64.zip" ^
   "whisper.cpp for NVIDIA - 671 MB"
 
-call :getbin "whisper-cpu"  5000000   ^
-  "%GH%/whisper.cpp/releases/download/%WHISPER_BUILD%/whisper-bin-x64.zip" ^
-  "whisper.cpp without a GPU - 8 MB"
-
-call :getbin "whisper-vulkan" 15000000 ^
-  "https://github.com/NGJHD/Meeting-Summarizer/releases/download/whisper-vulkan-b4938/whisper-vulkan-b4938.zip" ^
-  "whisper.cpp for AMD and Intel - 18 MB"
-
-rem  The CUDA runtime is shared by both NVIDIA builds and sits in bin\ itself,
-rem  where Windows finds it on PATH for either engine.
-call :getbin "" 380000000 ^
+rem  The CUDA runtime is shared by both engines and sits in bin\ itself, where
+rem  Windows finds it on PATH for either.
+call :getbin "" "cudart64_12.dll" 380000000 ^
   "%GH%/llama.cpp/releases/download/%LLAMA_BUILD%/cudart-llama-bin-win-cuda-12.4-x64.zip" ^
   "NVIDIA CUDA runtime - 391 MB"
 
 echo.
-echo   ---------------------------------------
+echo   ---------------------------------------------
 if defined FAILED (
   echo   SOME DOWNLOADS FAILED. Re-run this script; finished files are skipped.
 ) else (
   echo   All models and binaries downloaded.
   echo.
-  echo   You can now copy this entire folder to the offline machine
-  echo   and start it with run.bat.
+  echo   Start the app with run.bat. You can also copy this whole folder
+  echo   to another machine with an NVIDIA graphics card.
 )
 echo.
 pause
@@ -264,17 +193,19 @@ exit /b 0
 
 rem ---------------------------------------------------------------------------
 :getbin
-rem  %1 folder under bin\ - blank means bin\ itself   %2 minimum bytes
-rem  %3 url   %4 description
+rem  %1 folder under bin\ - blank means bin\ itself   %2 the file that proves it
+rem  is already installed   %3 minimum bytes   %4 url   %5 description
 set "SUB=%~1"
-set "MINSIZE=%~2"
-set "URL=%~3"
-set "DESC=%~4"
+set "SENTINEL=%~2"
+set "MINSIZE=%~3"
+set "URL=%~4"
+set "DESC=%~5"
 if "%SUB%"=="" ( set "DEST=bin" ) else ( set "DEST=bin\%SUB%" )
 
-if exist "%DEST%\llama-server.exe" goto :binskip
-if exist "%DEST%\whisper-cli.exe"  goto :binskip
-if "%SUB%"=="" if exist "bin\cudart64_12.dll" goto :binskip
+if exist "%DEST%\%SENTINEL%" (
+  echo   [skip] %DESC% - already present
+  exit /b 0
+)
 
 echo   [....] %DESC%
 if not exist "temp" mkdir "temp"
@@ -304,26 +235,23 @@ if errorlevel 1 (
 )
 del /Q "temp\_bin.zip"
 
-rem  The whisper zips wrap everything in Release\; flatten it so every backend
-rem  folder has the same shape.
-if exist "%DEST%\Release\whisper-cli.exe" (
+rem  The whisper zip wraps everything in Release\; flatten it.
+if exist "%DEST%\Release\" (
   move /Y "%DEST%\Release\*" "%DEST%\" >nul 2>&1
   rmdir /S /Q "%DEST%\Release" 2>nul
+)
+if not exist "%DEST%\%SENTINEL%" (
+  echo   [FAIL] %DESC% - the download did not contain %SENTINEL%
+  set "FAILED=1"
+  exit /b 1
 )
 echo   [ ok ] %DESC%
 exit /b 0
 
-:binskip
-echo   [skip] %DESC% - already present
-exit /b 0
-
 rem ---------------------------------------------------------------------------
 :get_optional
-rem  %1 target  %2 minimum bytes  %3 url  %4 description
-rem
-rem  As :get, but a failure is not an install failure. Used for models the app
-rem  runs without: word alignment falls back to whisper's own timings, so a
-rem  missing file costs some quality and nothing else. Marking FAILED here
+rem  As :get, but a failure is not an install failure. Used for the High Quality
+rem  model: without it the full summary uses Low Quality. Marking FAILED here
 rem  would tell the user their install is broken when it is not.
 rem  Remember whether anything had already failed: clearing FAILED
 rem  unconditionally would erase an earlier, real failure.

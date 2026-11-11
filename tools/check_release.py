@@ -6,7 +6,7 @@ Run this after `gh release create`. It asks GitHub the same question the in-app
 update button asks and reports what an installed copy would actually do, which
 is the part you cannot verify by looking at the releases page.
 
-Development only; excluded from both release zips. See RELEASE_GUIDE.md.
+Development only; excluded from both release zips.
 """
 
 from __future__ import annotations
@@ -19,13 +19,14 @@ sys.path.insert(0, str(ROOT))
 
 from server import updater, version  # noqa: E402
 
-# DOWNLOAD_MODELS.bat fetches from these by name. Deleting either breaks every
-# future install, and the whisper one is our own compile -- it exists nowhere
-# else, because whisper.cpp publishes no Vulkan build for Windows.
-LOAD_BEARING = ("runtime-cpython-3.12.14", "whisper-vulkan-b4938",
-                "align-wav2vec2-base-960h")
+# DOWNLOAD_MODELS.bat fetches the Python runtime from the batch Meeting
+# Summariser's releases, by tag. Deleting it there breaks every future install
+# of this app too.
+RUNTIME_REPO = "NGJHD/Meeting-Summarizer"
+LOAD_BEARING = ("runtime-cpython-3.12.14",)
+PREFIX = "Meeting-Transcriber-Live"
 
-RELEASES_API = "https://api.github.com/repos/%s/releases" % version.GITHUB_REPO
+RELEASES_API = "https://api.github.com/repos/%s/releases" % RUNTIME_REPO
 
 failures: list[str] = []
 notes: list[str] = []
@@ -78,8 +79,8 @@ def main() -> int:
     by_name = {a["name"]: a for a in assets}
     print("  %-4s assets attached: %s" % ("--", ", ".join(by_name) or "none"))
 
-    small = "Meeting-Summariser-%s.zip" % want_tag
-    full = "Meeting-Summariser-%s-full.zip" % want_tag
+    small = "%s-%s.zip" % (PREFIX, want_tag)
+    full = "%s-%s-full.zip" % (PREFIX, want_tag)
     check(small in by_name, "update payload attached", small)
     if not check(full in by_name, "full bundle attached", full):
         notes.append("Without the full bundle a new install has no runtime or "
@@ -103,7 +104,7 @@ def main() -> int:
         check(size < 50_000_000, "the download is small",
               "%.1f KB" % (size / 1024))
 
-    print("\nThe pre-releases DOWNLOAD_MODELS.bat depends on")
+    print("\nThe pre-release DOWNLOAD_MODELS.bat depends on (%s)" % RUNTIME_REPO)
     try:
         every = updater._get_json(RELEASES_API)
         tags = {str(r.get("tag_name")): r for r in every}
@@ -122,7 +123,6 @@ def main() -> int:
             print("  - %s" % f)
         for n in notes:
             print("\n%s" % n)
-        print("\nSee RELEASE_GUIDE.md, 'When something goes wrong'.")
         return 1
 
     print("ALL CHECKS PASSED -- %s is live and installable." % tag)

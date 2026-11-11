@@ -14,7 +14,8 @@ Verified 2026-10-30 against the binaries in `bin/`.
 **`whisper-server.exe`** was missing from `bin\whisper-cuda\`. It is in the pinned upstream
 zip (`whisper-cublas-12.4.0-bin-x64.zip`, build `b4938`) alongside the `whisper-cli.exe`
 already shipped, so it shares the same DLLs. The copy in `bin\` arrived without it (not
-investigated which step dropped it). `DOWNLOAD_MODELS.bat` must make sure it is kept.
+investigated which step dropped it). `DOWNLOAD_MODELS.bat` now looks for
+`whisper-server.exe` specifically, so a copy made from the batch app fetches it.
 
 | CLAUDE.md says | Shipped build | Notes |
 |---|---|---|
@@ -242,3 +243,77 @@ capitalised words. A punctuated opening line passed as the prompt
 commas, 25% capitalised. The refine pass also merges whisper's segments into
 sentence-length lines (`session._sentence_lines`): a line ends at a sentence end
 once it is 60+ characters, at a pause of 2 s or more, or at about 300 characters.
+
+---
+
+## 5. The built app, end to end (2026-11-11)
+
+All runs replay a recording of an in-room meeting through `capture.replay_file`, on the
+dev machine (RTX 5060 Ti 16 GB chosen over the RTX 3080 by VRAM, as CLAUDE.md §8 requires).
+
+**12-minute replay, 2-minute blocks** (to exercise the refine pass and notes six times):
+
+| | |
+|---|---|
+| models loaded | whisper GPU 2.8 s, whisper CPU 2.3 s, llama-server 8 s; warm-up 0.6 s |
+| utterances | 111 |
+| latency, last speech frame -> text on the page | median 1.09 s, p90 1.31 s, max 4.12 s |
+| refine pass (CPU, 12 threads) | 40-63 s per ~2-minute block |
+| notes per block | 5.4-9.8 s, 26-33 tok/s |
+| peak VRAM, 5060 Ti | 14,774 MiB (whisper GPU + IQ3_XXS + MTP) |
+| VRAM on the 3080 | 0 -- the CPU refine server sees no GPU (`CUDA_VISIBLE_DEVICES=""`) |
+| stop when the replay ran out | automatic; partial block refined and noted |
+| meeting text outside `output\<meeting>\` | none -- grep of the app folder, `temp\` included |
+
+**Full summary of that meeting, forced multi-tier** (`summary.target_tokens` 800,
+`group_reduce_threshold` 2):
+
+| | |
+|---|---|
+| model | IQ4_XS, ctx 32768, fully on the GPU, MTP; ready in 17 s after whisper and IQ3 were unloaded |
+| path | 266 lines -> 11 chunks -> group tier 1 (3 groups) -> tier 2 (1) -> final |
+| map calls | 13-31 s each, 27-33 tok/s |
+| final call, thinking on | 143 s; 1,660-token document, 5,681 tokens including thinking |
+| after | llama-server stopped, VRAM back to 438 MiB, no processes left |
+| output | topic sections in paragraphs, no bullets or labels; clock times cited |
+
+Two group calls hit `max_group_output_tokens` (2,500). That is an artefact of the forced
+800-token chunks producing many notes per group; at the default 10,000-token chunks a
+group holds far less. Worth watching on a real 3-hour meeting.
+
+**Shutdown.** Stopping the server process left no `whisper-server.exe`,
+`llama-server.exe` or `ffmpeg.exe` running.
+
+**`run.bat`** was launched for real: preflight passed, the server came up on 8000 and the
+browser opened. Its desktop shortcut had an empty version stamp (`?v=`), a bug carried
+over from the batch app, where a `for /f` command beginning with a quoted path loses its
+quotes. Fixed by prefixing `call`.
+
+### Acceptance tests (CLAUDE.md §16): what has run
+
+| # | Test | State |
+|---|---|---|
+| 1 | Latency | **passed** on replay (12 min; the spec asks for 30) |
+| 2 | No lost speech | not yet |
+| 3 | Silence produces no lines | not yet |
+| 4 | Mixed language comes out English | **passed** (0 CJK characters, replay and live mic) |
+| 5 | Blocks appear and never change | **passed** on replay |
+| 5a | Refine replaces lines; view does not jump | lines replaced, **passed**; the no-jump anchoring is untested by hand |
+| 6 | Notes are grounded | not yet spot-checked |
+| 7 | Three hours | not yet |
+| 8 | VRAM headroom >= 0.5 GiB | **passed** (14,774 of 16,311 MiB) |
+| 9 | Reattach after closing the tab | not yet |
+| 10 | Unplug the mic mid-session | not yet |
+| 11 | Force-quit the console | not yet |
+| 12 | Network adapter disabled | not yet |
+| 13 | Text in one place | **passed** |
+| 14 | Port | not yet |
+| 15 | Portable to another drive | not yet |
+| 16 | Full summary | **passed** through the API; the Save dialog is untried by hand |
+| 17 | Full summary cancelled midway | not yet |
+| 18 | Save dialog in front of the browser | not yet -- needs a person |
+| 19 | History, rename, delete | partly: list and open verified; rename and delete untried |
+| 20 | Crash safety | not yet |
+| 21 | Browse while live | not yet |
+| 22 | Summary from a past meeting | **passed** (the summary above was of a past meeting) |
+| 23 | Mic check leaves nothing | not yet |

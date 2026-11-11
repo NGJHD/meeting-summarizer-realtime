@@ -1,21 +1,72 @@
 # Meeting Transcriber Live
 
-A fully offline Windows app that listens to a microphone in a meeting room, shows a live
-English transcript a second or two behind the speaker, and keeps a column of short notes
-summarising each 5-minute block of the meeting.
+A fully offline Windows app for in-room meetings. It listens to a microphone, shows a live
+English transcript a second or two behind the speaker, and writes a short plain-English note
+about every 5 minutes of the meeting. When the meeting ends, one button writes a full summary
+of it, topic by topic.
 
-- Runs entirely on the local machine: whisper.cpp for speech, llama.cpp for the notes.
-- Mixed English and Mandarin speech comes out as English.
-- Every meeting's transcript and notes are kept, as text, in a history sidebar. Audio is
-  never saved.
-- One button writes a full summary of the meeting, topic by topic.
-- NVIDIA GPU with 16 GB of VRAM, Windows 11.
+- **Offline.** Speech recognition (whisper.cpp) and the notes (llama.cpp) run on this
+  machine. Nothing is sent anywhere; the only network use is the *Check for updates*
+  button.
+- **Mixed English and Mandarin** comes out as English.
+- **History.** Every meeting's transcript and notes are kept, as text, in the app's
+  `output\` folder and listed in the sidebar. Audio is never saved.
+- **Real clock times** on every line and note.
 
-**Status: in development.** This repository was started from
-[Meeting-Summarizer](https://github.com/NGJHD/Meeting-Summarizer), the batch version that
-turns a recording into minutes. The kept code does not run yet. `CLAUDE.md` is the
-specification and the build order.
+## Requirements
+
+- Windows 11
+- An NVIDIA graphics card with 16 GB of video memory (one card is used, even if there are
+  several)
+- 32 GB of system RAM
+- A microphone in the room
+- About 30 GB of disk space
+
+## Installing
+
+1. Download **`Meeting-Transcriber-Live-vX.Y.Z-full.zip`** from the latest release and
+   unzip it.
+2. Double-click **`DOWNLOAD_MODELS.bat`** once, on a machine with internet access. It
+   fetches the speech model and the language models (about 27 GB). Re-running it skips
+   anything already downloaded.
+
+After that the folder is self-contained: copy it anywhere, to any drive, and it works
+without a network connection.
+
+## Using it
+
+1. Double-click **`run.bat`**. Keep its black window open; closing it stops the app. The
+   browser opens by itself.
+2. Pick the **Microphone**. The glowing line along the top of the transcript moves when it
+   hears sound — check it before the meeting starts. If the mic is plugged into a different
+   USB port next time, the app finds it again by name.
+3. Press **Start**. The first start loads the models (up to a minute).
+   - Lines appear in grey within a second or two of someone pausing.
+   - Every 5 minutes, that block is transcribed again more carefully and the grey lines
+     are replaced with the cleaner text. A note about the block then appears on the right.
+4. Press **Stop** when the meeting ends. The meeting is saved in the **History** sidebar.
+5. **Generate Full Summary** (below the transcript) stops listening if the meeting is still
+   running, and writes a summary of the whole meeting: each topic discussed and how it
+   ended. It is kept with the meeting, and a copy is saved wherever you choose (the Desktop
+   by default). It takes a few minutes; it can also be run later on any past meeting.
+
+Right-click a meeting in the sidebar to rename or delete it.
+
+## Settings
+
+There is no settings screen. Everything tunable is in **`config.json`**, which can be edited
+in Notepad — see `CLAUDE.md` §14 for what each value does.
+
+## For developers
+
+`CLAUDE.md` is the specification and the reasoning behind every design decision.
+`BUILD_NOTES.md` has the measurements. `tools/spike.py` replays a recording through the
+pipeline at real time; setting `capture.replay_file` in `config.json` does the same inside
+the app.
+
+This app started from [Meeting-Summarizer](https://github.com/NGJHD/Meeting-Summarizer), the
+batch version that turns a recording into minutes.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see `LICENSE`. Third-party components are listed in `THIRD_PARTY_NOTICES.md`.

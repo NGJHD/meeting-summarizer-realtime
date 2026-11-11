@@ -4,8 +4,8 @@ r"""Build the two release assets. Development only; not shipped.
 
 A release carries two zips and they are not variants of the same thing:
 
-  Meeting-Summariser-vX.Y.Z.zip        the source tree, ~190 KB
-  Meeting-Summariser-vX.Y.Z-full.zip   the same plus runtime\, bin\ and the small models, ~1.47 GB
+  Meeting-Transcriber-Live-vX.Y.Z.zip        the source tree, well under 1 MB
+  Meeting-Transcriber-Live-vX.Y.Z-full.zip   the same plus runtime\, bin\ and the small models
 
 The small one is the **update payload** -- what the in-app updater downloads and
 robocopies over an install. It must stay small and must never contain
@@ -14,12 +14,8 @@ running app is executing from, and a half-copied interpreter cannot start, so
 it cannot self-repair. `version.pick_asset` skips anything with `-full` in the
 name for exactly that reason.
 
-The full one is for a **first install**: unzip it and only the three large
-models are left to download. Everything in it is the set that was actually
-tested, rather than whatever the pinned URLs happen to serve later.
-
-The three large models are never bundled -- see BUNDLED_FILES below for which
-ones do travel and why.
+The full one is for a **first install**: unzip it and only the speech model and
+the language models are left to download (DOWNLOAD_MODELS.bat skips the rest).
 """
 
 from __future__ import annotations
@@ -34,30 +30,16 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from server import version  # noqa: E402
 
-PREFIX = "Meeting-Summariser"
+PREFIX = "Meeting-Transcriber-Live"
 BUNDLED_DIRS = ("runtime", "bin")
 
 # The models small enough to travel, named individually -- `models\` as a whole
-# is 25 GB. The first three are 103 MB and they carry their weight twice over:
-# they are also the only downloads that were never pinned to immutable bytes
-# (sherpa-onnx publishes them on floating release tags), and the segmentation
-# one arrives as a tar.bz2 that has to be unpacked and renamed. Shipping them
-# retires the most fragile step in DOWNLOAD_MODELS.bat.
-#
-# The aligner is 360 MB raw but deflates to 220 MB, taking the bundle from
-# 1.24 GB to about 1.47 GB -- still clear of GitHub's 2 GB per-asset limit.
-# It is worth the space: it is exported by us from torchaudio (no .onnx is
-# published anywhere), so the alternative is self-hosting it as yet another
-# release asset that a first install has to fetch separately.
-#
-# Whisper large-v3-turbo is deliberately not here. It compresses to 1.42 GB,
-# which would take the bundle past the limit.
+# is about 27 GB. The two Silero VAD files are 3 MB together. Whisper
+# large-v3-turbo is deliberately not here: it compresses to 1.42 GB, which would
+# take the bundle past GitHub's 2 GB per-asset limit.
 BUNDLED_FILES = (
+    "models/silero_vad.onnx",
     "models/ggml-silero-v5.1.2.bin",
-    "models/segmentation-3.0.onnx",
-    "models/speaker-embedding.onnx",
-    "models/wav2vec2-align.onnx",
-    "models/wav2vec2-align.json",
 )
 SKIP_PARTS = {"__pycache__"}
 # This script is tracked so that a release is reproducible from the repository,
@@ -101,47 +83,37 @@ def check_shippable_config() -> None:
     r"""Refuse to build if config.json carries this machine's local state.
 
     config.json is tracked -- it is the default a new install gets -- and the
-    app also writes to it: choosing Port in the Model dropdown sets
-    `llm.external` (CLAUDE.md section 13.3). So anyone who runs the app while
+    app also writes to it: the Model dropdown sets `llm.external`, the
+    Microphone dropdown sets `capture.device`. Anyone who runs the app while
     developing dirties the file, and `git add -A` ships it.
 
-    That happened. 1.2.0 through 1.2.2 shipped `external.enabled: true`, so
-    every fresh install defaulted to a llama-server on port 9931 that was not
-    running on that machine, and failed only after transcription and
-    diarization had already been paid for. Existing installs were spared purely
-    because version.PRESERVE keeps config.json across an update.
+    The batch app shipped `external.enabled: true` in three releases that way,
+    so every fresh install looked for a server on a port nobody was running.
 
-    This fails the build rather than quietly normalising the file: the working
-    tree and the zip should not disagree about what was shipped.
+    Test settings are refused outright -- a replay file, short blocks, tiny
+    chunks -- because each would ship a working-but-wrong app. The microphone
+    name is reset instead: shipped, it is harmless (the app falls back to the
+    Windows default), but it is somebody's hardware, not a default.
     """
     cfg = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
-    external = (cfg.get("llm") or {}).get("external") or {}
-    if external.get("enabled"):
-        raise SystemExit(
-            "config.json has llm.external.enabled = true. "
-            "That is this machine's Port selection, not a shippable "
-            "default. Set it to false, or pick High or Low Quality in the "
-            "app, then rebuild."
-        )
-    # The Output dropdown is the second thing the UI writes here, and it
-    # dirties the file the same way -- but this one is reset rather than
-    # refused. llm.external.enabled shipped wrong breaks a fresh install an
-    # hour into a job (9am); ui.mode shipped wrong preselects a dropdown the
-    # user can change, and failing the build over that would stop a release
-    # every time somebody tested Minutes. Section 13.2 has the default at
-    # "Summary & Minutes", so it is set back here.
-    #
-    # The file on disk is what changes, not just the copy in the zip: the
-    # working tree and the zip should not disagree about what was shipped.
-    # Said out loud, because a build that silently edits tracked files is
-    # worse than one that refuses.
-    mode = (cfg.get("ui") or {}).get("mode", "both")
-    if mode != "both":
-        cfg.setdefault("ui", {})["mode"] = "both"
-        (ROOT / "config.json").write_text(
-            json.dumps(cfg, indent=2) + '\n', encoding="utf-8")
-        print("config.json: ui.mode was %r, reset to \"both\" for the release"
-              % mode)
+    problems = []
+    if ((cfg.get("llm") or {}).get("external") or {}).get("enabled"):
+        problems.append("llm.external.enabled is true (this machine's Port choice)")
+    if (cfg.get("capture") or {}).get("replay_file"):
+        problems.append("capture.replay_file is set (a development replay)")
+    if int((cfg.get("notes") or {}).get("block_s", 300)) != 300:
+        problems.append("notes.block_s is not 300 (a test value)")
+    s = cfg.get("summary") or {}
+    if int(s.get("target_tokens", 10000)) != 10000 or int(s.get("group_reduce_threshold", 8)) != 8:
+        problems.append("summary chunking is not the default (a test value)")
+    if problems:
+        raise SystemExit("config.json is not shippable:\n  - " + "\n  - ".join(problems))
+
+    device = (cfg.get("capture") or {}).get("device", "")
+    if device:
+        cfg["capture"]["device"] = ""
+        (ROOT / "config.json").write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+        print("config.json: capture.device was %r, reset to \"\" for the release" % device)
 
 
 def main() -> None:

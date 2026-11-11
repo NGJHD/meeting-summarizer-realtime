@@ -8,10 +8,13 @@ writes a full summary of the meeting (§7.1).
 
 This repository began as a copy of the batch app at
 `https://github.com/NGJHD/Meeting-Summarizer` (a recording goes in, minutes come out). About
-two thirds of that code was removed when this repo was created. What remains is the
-infrastructure that carries over: hardware detection, the llama-server lifecycle, config,
-cleanup, the updater and the packaging. That code still references the removed modules and
-**does not run yet**. Section 15 is the order in which it is brought back to life.
+two thirds of that code was removed; hardware detection, the llama-server lifecycle,
+config, cleanup, the updater and the packaging carried over and were cut down to fit.
+
+**Status (2026-11-11): built, and verified on replayed recordings and one live microphone
+check.** §15 marks each build step's state. §16 lists the acceptance tests; the ones that
+need a person, a real meeting or a clean machine are still open, and `BUILD_NOTES.md` §5
+records what has and has not been run.
 
 Read this entire file before writing any code. Every design decision here was made
 deliberately. If you think one is wrong, say so explicitly in your response — do not
@@ -81,12 +84,10 @@ bin\whisper-cuda\whisper-server.exe --help
 bin\ffmpeg.exe -hide_banner -list_devices true -f dshow -i dummy
 ```
 
-**`whisper-server.exe` is not in `bin\whisper-cuda\` as it stands.** The batch app only ever
-used `whisper-cli.exe`. The `SDL2.dll` that is present suggests the upstream release zip
-carried more executables than were kept, so check the zip that `DOWNLOAD_MODELS.bat` fetches
-(`whisper-cublas-12.4.0-bin-x64.zip` at the pinned build) before anything else. If it is not
-in there, stop and report. Do not substitute `whisper-cli.exe` per utterance: reloading a
-1.6 GB model for every sentence defeats the point.
+**`whisper-server.exe` comes from the pinned upstream zip** (`whisper-cublas-12.4.0-bin-x64.zip`,
+build `b4938`); the batch app had kept only `whisper-cli.exe`. `DOWNLOAD_MODELS.bat` now checks
+for `whisper-server.exe` specifically. Do not substitute `whisper-cli.exe` per utterance:
+reloading a 1.6 GB model for every sentence defeats the point.
 
 For every flag and request parameter this document names, confirm it exists under that name
 in that build. If it is absent or renamed, use the equivalent and record the change in
@@ -878,30 +879,34 @@ Everything marked `"auto"` is detected per machine. An explicit value always win
 
 ## 15. BUILD ORDER
 
-Confirm each step before moving on.
+Confirm each step before moving on. State as of 2026-11-11 in brackets.
 
-1. **Verify binaries** per §1. Obtain `whisper-server.exe`. Start `BUILD_NOTES.md`.
+1. **Verify binaries** per §1. Obtain `whisper-server.exe`. Start `BUILD_NOTES.md`. [done]
 2. **Spike — this decides whether the design holds.** No UI. A script that loads
    whisper-server and IQ3_XXS llama-server (ctx 8192) together, feeds a recorded meeting
    through replay capture (§4) at real time, and fires one block summary mid-stream.
    Record peak VRAM, utterance latency (median and worst) with and without the LLM call
    running, and block-call time. Repeat with MTP on and off, and with IQ4_XS +
-   offload. **Report before going further.**
+   offload. **Report before going further.** [done — `BUILD_NOTES.md` §2]
 3. **Strip and boot** — cut `main.py`, `jobs.py`, `config.py` and `hardware.py` down (§13)
-   until the app starts and serves an empty two-column page with the About overlay.
-4. **Capture + level meter + device list** — the meter moves when you speak.
-5. **VAD + whisper → transcript column** — live, with the hallucination filter.
+   until the app starts and serves an empty two-column page with the About overlay. [done]
+4. **Capture + level meter + device list** — the meter moves when you speak. [done; level
+   verified on a replay through the room speaker, not yet with a person speaking]
+5. **VAD + whisper → transcript column** — live, with the hallucination filter. [done]
 5a. **Refine pass** (§6.1) — CPU whisper-server, block audio ring, line swap with scroll
-    anchoring.
-6. **Block notes → notes column.**
-7. **Stop, reattach, idle unload, shutdown, kill-on-close.**
+    anchoring. [done]
+6. **Block notes → notes column.** [done]
+7. **Stop, reattach, idle unload, shutdown, kill-on-close.** [stop, idle unload and clean
+   shutdown verified; reattach and force-quit not yet]
 7a. **Generate Full Summary** (§7.1): confirm modal, server-side Save dialog, transcript
     file, model swap, restored chunker/reduce, summary file, Cancel. Verify the three-tier
-    path by lowering `summary.group_reduce_threshold` to 2 on a short replay.
+    path by lowering `summary.group_reduce_threshold` to 2 on a short replay. [done via the
+    API; the Save dialog and Cancel not yet tried by hand]
 8. **Long-session test** — 3 hours of replay. Memory, latency and block timing at hour three
-   match hour one.
+   match hour one. [not yet]
 9. **Packaging** — `run.bat`, `DOWNLOAD_MODELS.bat`, notices, release scripts, README.
-10. **Error message polish.**
+   [done; no release built or published yet]
+10. **Error message polish.** [not yet]
 
 ---
 
