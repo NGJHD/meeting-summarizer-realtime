@@ -418,8 +418,9 @@ minutes would cost the GPU three times over. Blocks are stable, append-only and 
 
 **Edge cases:**
 
-- **Near-silent block:** fewer than `notes.min_words` (40) words → no LLM call; show *"Little
-  was said."*
+- **Near-silent block:** fewer than `notes.min_words` (40) words → **nothing at all**: no
+  note, no placeholder, no refine pass, nothing in `notes.md`. Its few lines stay in the
+  transcript. (Operator's choice, 2026-11-11, replacing a "Little was said." note.)
 - **Stop pressed:** summarise the partial final block if it has at least `min_words`, so the
   last minutes are not lost from the column.
 - **A call fails:** retry once. Then show *"Notes for this block couldn't be written."* in
@@ -727,7 +728,9 @@ A collapsible sidebar on the **left**, listing every meeting in `output\`, newes
   the one being viewed.
 - **Short sessions are not kept.** At Stop, a meeting with fewer than `notes.min_words`
   transcribed words has its folder removed and never appears in the list, so a quick mic
-  check leaves nothing behind.
+  check leaves nothing behind. **The notes column says so** in place of notes: *"Very little
+  was said, so this one wasn't saved to History."* Not a banner — one was tried and went
+  unnoticed.
 - **No automatic clean-up.** It is text; a year of daily meetings is a few tens of MB.
 
 **On disk** — one folder per meeting, named from the start time so it is unique and sorts

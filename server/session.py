@@ -274,6 +274,7 @@ class Session:
         self.utt_spans: dict[int, list] = {}
         self.prev_notes = ""
         self.skip_notes = False
+        self.not_kept = False
         self.behind = False
         self.warning = engines.llama_error or engines.refine_error
         self._next_id = 0
@@ -491,16 +492,17 @@ class Session:
         with self.lock:
             words = sum(len(l["text"].split()) for l in self.lines if l["block"] == k)
         spans = self.utt_spans.pop(k, [])
-        if not spans and words == 0 and end_s - start_s < self.block_s:
-            return                         # a silent partial block at Stop: nothing to show
+        self.meeting.update_meta(duration_s=max(end_s, self.meeting.meta.get("duration_s", 0)))
+        if words < self.min_words:
+            # A quiet block gets no note at all -- not even "little was said"
+            # (operator's choice, 2026-11-11) -- and no refine pass: there is
+            # nothing to summarise. Its few lines stay, shown as final.
+            self.ring.trim_before(end_s)
+            self._finalise_lines(k)
+            return
         block = {"index": k, "start_s": start_s, "end_s": max(end_s, start_s),
                  "status": "pending", "notes": ""}
         self.blocks[k] = block
-        self.meeting.update_meta(duration_s=max(end_s, self.meeting.meta.get("duration_s", 0)))
-        if not spans or words == 0:
-            self.ring.trim_before(end_s)
-            self.notes_q.put(k)
-            return
         want_refine = engines.cpu is not None and self.cfg["asr"].get("refine", True)
         if want_refine and self.refine_busy:
             # Never queue a refine behind a slow one: degrade to rough text,
@@ -604,8 +606,11 @@ class Session:
                 bus.emit({"type": "block", "block": dict(block)})
                 continue
             if words < self.min_words:
-                block.update(status="empty", notes="_Little was said._")
-            elif engines.llama is None:
+                # Refining can shorten a block below the threshold: still no note.
+                block.update(status="skipped", notes="")
+                bus.emit({"type": "block", "block": dict(block)})
+                continue
+            if engines.llama is None:
                 block.update(status="failed",
                              notes="_Notes for this block couldn't be written._")
             else:
@@ -629,7 +634,7 @@ class Session:
                     jobs.log_exception(exc)
                     block.update(status="failed",
                                  notes="_Notes for this block couldn't be written._")
-            if block["status"] in ("done", "empty"):
+            if block["status"] == "done":
                 self.meeting.append_block(block["start_s"], block["end_s"], block["notes"])
             bus.emit({"type": "block", "block": dict(block)})
 
@@ -649,6 +654,7 @@ class Session:
             "lines": lines,
             "blocks": [dict(self.blocks[k]) for k in sorted(self.blocks)],
             "has_summary": bool(self.meeting.meta.get("has_summary")),
+            "not_kept": NOT_KEPT if self.not_kept else "",
             "summary": self.meeting.read_summary() if self.meeting.meta.get("has_summary") else "",
         }
 
@@ -839,7 +845,7 @@ class App:
         if not for_summary and s.meeting.word_count() < s.min_words:
             history.delete(s.meeting.id)
             jobs.log("session: under %d words, not kept" % s.min_words)
-            bus.emit({"type": "notice", "message": NOT_KEPT})
+            s.not_kept = True               # shown in the notes column
         cfg = config.load_config()
         if not for_summary:
             engines.schedule_idle_stop(float(cfg["llm"].get("idle_timeout_s", 300)))

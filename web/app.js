@@ -347,7 +347,8 @@
     showMeeting({
       id: snap.id, name: snap.name, live: live, lines: snap.lines, blocks: snap.blocks,
       summary: snap.summary || "", has_summary: !!snap.has_summary,
-      next_notes_at: snap.next_notes_at, block_s: snap.block_s || 300, started: snap.started
+      next_notes_at: snap.next_notes_at, block_s: snap.block_s || 300, started: snap.started,
+      not_kept: snap.not_kept || ""
     });
   }
 
@@ -511,6 +512,16 @@
     var box = $("notes");
     var blocks = (S.view.blocks || []).filter(function (b) { return b.status !== "skipped"; });
     box.innerHTML = "";
+    // A session too short to keep says so here, in place of its notes.
+    if (S.view.not_kept) {
+      blocks = [];
+      var gone = document.createElement("p");
+      gone.className = "placeholder";
+      gone.textContent = S.view.not_kept;
+      box.appendChild(gone);
+      $("jump-notes").hidden = true;
+      return;
+    }
     if (!blocks.length) {
       var ph = document.createElement("p");
       ph.className = "placeholder";
