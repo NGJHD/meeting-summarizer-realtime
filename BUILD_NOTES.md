@@ -203,4 +203,32 @@ operator is satisfied with in the batch app. Word error rate against that refere
 - Hallucinated fillers ("Thank you.") appear in the live output, as §6 expected.
 
 This points at a second pass: re-transcribe each finished block batch-style, from audio
-held in memory only. Proposed to the operator; not yet in the spec.
+held in memory only. Approved by the operator; see §4 and CLAUDE.md §6.1.
+
+---
+
+## 4. The refine pass — how to re-transcribe a block (2026-11-11)
+
+Same 10 minutes and the same batch-style reference as §3. All runs use `whisper-cli`,
+large-v3-turbo, `-l en` and `--vad` with `ggml-silero-v5.1.2.bin`.
+
+| method | WER vs reference | wall time |
+|---|---|---|
+| whole 300 s block, GPU | **21.1%** | 10.0 s incl. model load |
+| 60 s chunks, fixed cuts, GPU | 42.2% | — |
+| 60 s chunks + previous 200 chars as `--prompt`, GPU | 38.4% | — |
+| whole 300 s block, **CPU** (`-ng`), 8 threads | 31.2% (both blocks) | **122 s** |
+| whole 300 s block, CPU, 12 threads | (as above) | **106 s** |
+| CPU blocks vs GPU blocks, against each other | 22.9% | |
+
+- **Chunking loses most of the gain.** Prompt carry recovers 4 points of the 21 lost. The
+  long window is the point; it cannot be approximated with short ones.
+- **~20–25% is the noise floor on this audio.** Two equally valid batch passes, CPU and
+  GPU, differ by 22.9%: the numerics differ slightly, and the Mandarin translation is
+  re-worded. The reference was made on the GPU, which is why GPU blocks score closer to it
+  — not evidence that CPU blocks are worse. Read every WER in §3–4 against that floor.
+- **CPU refine keeps up:** 106–122 s per 300 s block is 35–41% of real time, on a machine
+  with 24 logical cores. A 16-thread machine should still manage at 8 threads.
+- Chosen: **a second whisper-server, CPU-only, whole blocks** (CLAUDE.md §6.1). The GPU
+  instance would serve one request at a time and stall live lines 5–10 s per block. A
+  second GPU instance needs ~1.9 GiB that §2 shows is not there.

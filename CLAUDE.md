@@ -105,12 +105,14 @@ Microphone
       └─> VAD segmenter (CPU)  → utterances (§5)
            └─> whisper-server (GPU, resident)   → English text per utterance (§6)
                 ├─> transcript column           (SSE, a second or two behind speech)
-                └─> block buffer: every 5 min of audio
-                     └─> llama-server (GPU, resident, thinking off) → block notes (§7)
+                └─> block buffer: every 5 min of audio (in memory only)
+                     └─> whisper-server (CPU, resident) → refined block text (§6.1)
+                          └─> llama-server (GPU, resident, thinking off) → block notes (§7)
                           └─> notes column      (SSE)
 ```
 
-Three long-lived children: `ffmpeg.exe`, `whisper-server.exe`, `llama-server.exe`. The
+Four long-lived children: `ffmpeg.exe`, two `whisper-server.exe` (GPU for live lines,
+CPU for the refine pass, §6.1) and `llama-server.exe`. The
 Python layer is an **orchestrator only**. It reads a pipe, runs a tiny VAD model, and makes
 HTTP calls. It performs no recognition or generation itself.
 
@@ -150,6 +152,7 @@ MeetingTranscriber\
   models\
     ggml-large-v3-turbo.bin
     silero_vad.onnx                     <- for our own segmenter (§5)
+    ggml-silero-v5.1.2.bin              <- whisper's own VAD, refine pass only (§6.1)
     Qwen3.8-27B-UD-IQ3_XXS.gguf         <- default (§8)
     Qwen3.8-27B-UD-IQ4_XS.gguf          <- optional; only where it fits beside whisper
   prompts\
@@ -310,6 +313,54 @@ every drop with its timestamp to `temp\job.log` — **the timestamp, not the tex
 **Latency target:** text appears within **2 s of the speaker pausing**. That is
 `min_silence_ms` (0.6 s) plus turbo inference on ≤15 s of audio (a few hundred ms on a
 16 GB card), plus transport. Measure it (§16); do not assume it.
+
+### 6.1 The refine pass — each finished block, transcribed again whole
+
+Live lines are fast and rough. Whisper translates 3–5 s pieces far worse than the long
+windows of a batch pass. Measured against batch-style transcription of the same audio
+(`BUILD_NOTES.md` §3–4), live utterances differ by 50–68%, a whole 5-minute block by
+21–31%, and two equally valid batch passes (CPU vs GPU) by 23% from each other. So block
+refining reaches the noise floor, and the live lines do not. The operator approved a second
+pass on 2026-11-11.
+
+- **When each 5-minute block closes**, its audio is transcribed again, **whole, in one
+  request**. Not in 60 s chunks: chunks measured 42%, or 38% with the previous text as a
+  prompt, which loses most of the gain.
+- **On a second whisper-server running on the CPU** (`-ng`), on its own port
+  (`asr.refine_port`, 8082), launched with `--vad --vad-model models\ggml-silero-v5.1.2.bin`
+  (batch quality used whisper's own VAD) and `-t asr.refine_threads`. The GPU instance
+  serves live utterances only, so live lines never wait behind a refine.
+  - Why not the GPU instance: it serves one request at a time, so a 300 s refine would
+    stall live lines for 5–10 s every 5 minutes.
+  - Why not a second GPU instance: +1.9 GiB, which does not fit beside the LLM.
+  - Measured: 106 s per 300 s block at 12 threads, 122 s at 8. `refine_threads: "auto"`
+    means half the logical cores, at least 4.
+  - Verify `-ng` takes no VRAM. The CUDA backend DLL still loads; if it creates a context
+    anyway, measure it against §8's headroom.
+- **Block audio** runs from the block's first utterance start to its last utterance end,
+  padded. Utterance boundaries are silences, so a block never splits a word. Utterances
+  belong to the block their start falls in (§7).
+- **Audio is held in memory only, and bounded:** the block being captured plus the one
+  being refined, about 10 minutes, ~19 MB. It is released the moment its refine returns
+  or fails. Never on disk (§10).
+- **Refined lines replace the block's live lines** — on screen, in `transcript.md` and in
+  the session. Their timestamps come from whisper's segment times, offset to session time.
+  The §6 hallucination filter runs on them too.
+- **The block's notes wait for the refined text**, so they are built from the better
+  transcript. They land about 2 minutes after the block closes.
+- **If a refine fails, or is still running when the next block closes,** keep the live
+  lines for that block, log it and move on. Never queue a second refine behind a slow one:
+  falling behind must degrade to rough text, not to growing delay.
+- **Stop and Generate Full Summary** refine the final partial block before whisper is
+  unloaded, while its audio is still in memory. A past meeting's audio is gone, so it
+  keeps whatever was saved.
+- **On screen:** live lines are shown in a muted grey until refined. The swap must not move
+  what the reader is looking at: anchor the scroll position to the first line visible
+  below the replaced range, so the column doesn't jump.
+- **On disk:** `transcript.md` is rewritten atomically after each refine, with refined
+  blocks first and the current block's live lines after them. Live lines are still appended
+  as they arrive between refines, so a crash loses nothing (§11.1).
+- **`asr.refine: false`** turns the whole pass off, giving live lines only.
 
 **Out of scope for v1:** word-by-word partial text while someone is still speaking. That
 needs re-decoding a sliding window several times a second, which is a different design with
@@ -694,15 +745,16 @@ into `config.json`.
 
 ## 12. CANCELLATION, SHUTDOWN, CLEANUP
 
-There are three child processes (`ffmpeg`, `whisper-server`, `llama-server`), all spawned
-with `CREATE_NEW_PROCESS_GROUP` and assigned to the kill-on-close Job Object
+There are four child processes (`ffmpeg`, both `whisper-server`s, `llama-server`), all
+spawned with `CREATE_NEW_PROCESS_GROUP` and assigned to the kill-on-close Job Object
 (`jobs.install_kill_on_close`). Force-quitting the console must leave **none** of them
 running.
 
 - **Stop:** terminate ffmpeg (`taskkill /F /T /PID`), let the VAD flush its open utterance,
-  let whisper finish the queue, then summarise the partial block (§7). The servers stay up
+  let whisper finish the queue, refine the partial block (§6.1), then summarise it (§7).
+  The servers stay up
   for `idle_timeout_s`.
-- **Shutdown** (console closed, FastAPI shutdown, `atexit`, `SIGBREAK`): kill all three, no
+- **Shutdown** (console closed, FastAPI shutdown, `atexit`, `SIGBREAK`): kill all four, no
   flush.
 - **Startup:** sweep `temp\` and kill any stale `whisper-server.exe` / `llama-server.exe` on
   our ports left by a previous crash — a stale one holds VRAM and the new one will fail to
@@ -738,8 +790,9 @@ and do not port them:
   and the update flow. `style.css` largely carries.
 - **`run.bat`:** preflight for this file set (whisper-server, silero_vad.onnx, at least one
   GGUF unless Port is on). Keep creating `output\`.
-- **`DOWNLOAD_MODELS.bat`:** drop the diarization models, the alignment model, the Vulkan and
-  CPU binaries and the ggml silero. Add `silero_vad.onnx`, pinned to a release tag of
+- **`DOWNLOAD_MODELS.bat`:** drop the diarization models, the alignment model and the
+  Vulkan and CPU binaries. **Keep** `ggml-silero-v5.1.2.bin` for the refine pass (§6.1).
+  Add `silero_vad.onnx`, pinned to a release tag of
   `snakers4/silero-vad`, never a branch head. Keep IQ4_XS as optional.
 - **`THIRD_PARTY_NOTICES.md`:** remove pyannote, sherpa-onnx, NeMo and wav2vec2. Add Silero
   VAD (MIT).
@@ -774,7 +827,11 @@ All tunables live in `config.json`. **There is no settings screen.** The UI writ
     "port": 8081,
     "carry_context": true,
     "max_queue": 4,
-    "drop_phrases": ["Thank you.", "Thanks for watching.", "you", "."]
+    "drop_phrases": ["Thank you.", "Thanks for watching.", "you", "."],
+    "refine": true,
+    "refine_port": 8082,
+    "refine_threads": "auto",
+    "refine_vad_model": "models/ggml-silero-v5.1.2.bin"
   },
   "notes": {
     "block_s": 300,
@@ -831,6 +888,8 @@ Confirm each step before moving on.
    until the app starts and serves an empty two-column page with the About overlay.
 4. **Capture + level meter + device list** — the meter moves when you speak.
 5. **VAD + whisper → transcript column** — live, with the hallucination filter.
+5a. **Refine pass** (§6.1) — CPU whisper-server, block audio ring, line swap with scroll
+    anchoring.
 6. **Block notes → notes column.**
 7. **Stop, reattach, idle unload, shutdown, kill-on-close.**
 7a. **Generate Full Summary** (§7.1): confirm modal, server-side Save dialog, transcript
@@ -853,8 +912,12 @@ Confirm each step before moving on.
 3. **Silence:** 10 minutes of a quiet room produces no transcript lines at all.
 4. **Mixed language:** a stretch of Mandarin-mixed speech produces readable English, not
    Chinese characters and not an empty line.
-5. **Blocks:** a block's notes appear within 30 s of its boundary and never change
-   afterwards. The partial block appears after Stop.
+5. **Blocks:** a block's notes appear within 3 minutes of its boundary (refine, then
+   notes) and never change afterwards. The partial block appears after Stop.
+5a. **Refine:** over a 30-minute replay, every block's lines are replaced by refined ones.
+    Refined text against batch-style `whisper-cli` on the same audio is within about 35%
+    word error (live lines alone measured 50–68%). Live latency stays within test 1 while
+    a refine runs. The view does not jump when a block is swapped.
 6. **Notes are grounded:** spot-check ten points against the transcript. No invented owners,
    deadlines or figures.
 7. **Three hours:** completes with flat memory (apart from transcript text), stable latency,
