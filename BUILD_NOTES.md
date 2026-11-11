@@ -378,8 +378,13 @@ summary:
 | agenda items in the back half of the meeting | thin | roughly doubled |
 | total time | 13 min | 17 min |
 
-The truncation fell on the end of each chunk, which is where later business sat. **Default
-is now 2,500.** Every topic of substance was present at 1,500 too, so this restores detail
+What the cap cuts is the **last headings** of each chunk's notes, not the end of the chunk in
+time: the notes are written heading by heading (Themes, then Outcomes, then Loose Ends),
+and generation simply stops at the cap. So Outcomes -- the decisions -- were the first
+casualty, which is what the decision count shows. In the batch app's own cache for a
+1h09m meeting, two of its three notes stopped inside Positions and Themes respectively, so
+Outcomes and Speaker Evidence never reached the final reduce for two-thirds of the
+meeting. **Default is now 2,500.** Every topic of substance was present at 1,500 too, so this restores detail
 and decisions rather than whole topics.
 
 ### Incidental passes

@@ -480,8 +480,9 @@ notes: those are terse, lossy and from the 3-bit model.
   their context guards. Take them from `NGJHD/Meeting-Summarizer` at commit `1559ecf` and
   strip speakers, minutes mode and calibration.
 - **Map notes get 2,500 tokens, not the batch app's 1,500.** At 1,500 every map call hit
-  the cap and lost the end of its chunk; at 2,500 a 3h43m meeting's summary recorded half
-  as many decisions again (`BUILD_NOTES.md` §6).
+  the cap and stopped mid-notes, losing its last headings — Outcomes and Loose Ends, the
+  decisions first; at 2,500 a 3h43m meeting's summary recorded half as many decisions
+  again (`BUILD_NOTES.md` §6).
 - **Sampling as in the batch app:** map and group-reduce run with thinking off. The final
   reduce runs with thinking on, `reasoning_effort` medium, `--reasoning-budget 4000`,
   `max_tokens` 12000, and the thinking-off retry on an empty `length` finish.
