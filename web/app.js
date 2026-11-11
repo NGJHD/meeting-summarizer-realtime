@@ -176,7 +176,6 @@
       case "history": loadHistory(); break;
       case "summary_progress": onSummaryProgress(ev); break;
       case "summary_done": onSummaryDone(ev); break;
-      case "error": banner(ev.message, "error"); break;
       case "notice": notice(ev.message); break;
     }
   }

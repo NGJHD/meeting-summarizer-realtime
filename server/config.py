@@ -71,7 +71,6 @@ _DEFAULTS = {
         # The microphone's friendly name, written by the UI. Never the dshow
         # GUID: that changes when the mic moves to another USB port (section 4).
         "device": "",
-        "block_ms": 32,
         # Development only: replay a recording at real time instead of the mic.
         "replay_file": "",
     },

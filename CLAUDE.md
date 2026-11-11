@@ -11,18 +11,26 @@ This repository began as a copy of the batch app at
 two thirds of that code was removed; hardware detection, the llama-server lifecycle,
 config, cleanup, the updater and the packaging carried over and were cut down to fit.
 
-**Status (2026-11-11): built, and verified on replayed recordings and one live microphone
-check.** §15 marks each build step's state. §16 lists the acceptance tests; the ones that
-need a person, a real meeting or a clean machine are still open, and `BUILD_NOTES.md` §5
-records what has and has not been run.
+**Status: v1.0.0 (2026-11-11).** Built and verified on replayed recordings, including a
+3h43m session, and on the operator's USB microphone.
 
 Read this entire file before writing any code. Every design decision here was made
 deliberately. If you think one is wrong, say so explicitly in your response — do not
 silently substitute your own approach.
 
+**The other documents:**
+
+| File | What is in it |
+|---|---|
+| `README.md` | For the person using the app: install, use, settings. |
+| `BUILD_NOTES.md` | Every measurement behind a decision here. Numbers only, no meeting content. |
+| `TESTING.md` | The acceptance tests (§16), which have run, and the hands-on checklist. |
+| `CHANGELOG.md` | What changed in each release. |
+| `RELEASING.md` | How to build and publish a release. |
+| `THIRD_PARTY_NOTICES.md` | Licences of everything bundled or downloaded. |
+
 Where this file says *measured in the batch app*, the evidence is in that repo's
-`BUILD_NOTES.md`. It is not copied here. Start a fresh `BUILD_NOTES.md` in this repo for
-everything measured in this one.
+`BUILD_NOTES.md` and is not copied here.
 
 ---
 
@@ -143,7 +151,8 @@ MeetingTranscriber\
   run.bat
   DOWNLOAD_MODELS.bat
   config.json
-  BUILD_NOTES.md              <- start fresh; flag verification + measurements
+  README.md  CLAUDE.md  BUILD_NOTES.md  TESTING.md  CHANGELOG.md  RELEASING.md
+  THIRD_PARTY_NOTICES.md  LICENSE
   runtime\                    <- standalone CPython + fastapi, uvicorn, numpy, onnxruntime
   bin\
     ffmpeg.exe
@@ -162,26 +171,27 @@ MeetingTranscriber\
   web\
     index.html  app.js  style.css
   server\
-    main.py           <- FastAPI app, routes, SSE                  (kept, cut down)
-    session.py        <- session state + lifecycle; replaces jobs.py's Job
-    jobs.py           <- process cleanup, kill-on-close            (kept, cut down)
-    capture.py        <- ffmpeg dshow → PCM pipe, device list, level meter   (new)
-    vad.py            <- silero under onnxruntime → utterances               (new)
-    asr.py            <- whisper-server lifecycle + client                   (new)
-    notes.py          <- the 5-minute block loop                             (new)
-    summary.py        <- Generate Full Summary: save dialog, model swap, files (new)
-    history.py        <- output\ meeting folders: append, list, rename, delete (new)
-    chunker.py reduce.py <- restored from the batch app, speakers stripped (§7.1)
-    llm.py            <- llama-server lifecycle + chat calls       (kept, mostly as is)
-    hardware.py       <- NVIDIA detection, VRAM, model choice     (kept, cut down)
-    config.py         <- config load/merge/write                  (kept, new schema)
-    open_browser.py   version.py   updater.py                     (kept)
-  temp\               <- job.log and the running lock only. Never transcript content.
+    main.py           <- FastAPI app: routes, SSE, the full-summary job runner
+    session.py        <- the live meeting: capture -> VAD -> whisper -> refine -> notes
+                         threads, the event bus, the resident models (Engines), the
+                         pre-Start level monitor, mic-dropout recovery
+    capture.py        <- ffmpeg dshow pipe, device list and matching, stall watchdog
+    vad.py            <- Silero under onnxruntime, the utterance segmenter
+    asr.py            <- both whisper-servers, requests, the hallucination filter
+    summary.py        <- Generate Full Summary: Save dialog, chunking, map / group /
+                         final reduce (the batch app's chunker.py + reduce.py, folded in)
+    history.py        <- output\ meeting folders: append, list, rename, delete, recover
+    llm.py            <- llama-server lifecycle (own or Port) and chat calls
+    hardware.py       <- NVIDIA detection, VRAM budgets, model choice and placement
+    jobs.py           <- Task (log, cancel, child processes), job log, kill-on-close
+    config.py         <- paths, config load/merge/write, child-process environment
+    open_browser.py   version.py   updater.py
+  tools\
+    spike.py          <- the §15 step 2 replay harness (whisper + LLM, no UI)
+    make_release.py   check_release.py   jscheck.py
+  temp\               <- job.log, server logs, the running lock. Never transcript content.
   output\             <- one folder per meeting: transcript, notes, summary (§11.1)
 ```
-
-`server/audio.py` (the batch ffmpeg converter) survives only as a source of patterns for
-`capture.py`, then goes. Do not keep code alive for a pipeline that no longer exists.
 
 ---
 
@@ -352,8 +362,15 @@ pass on 2026-11-11.
   - Why not a second GPU instance: +1.9 GiB, which does not fit beside the LLM.
   - Measured: 106 s per 300 s block at 12 threads, 122 s at 8. `refine_threads: "auto"`
     means half the logical cores, at least 4.
-  - Verify `-ng` takes no VRAM. The CUDA backend DLL still loads; if it creates a context
-    anyway, measure it against §8's headroom.
+  - **It takes no VRAM:** it is launched with every GPU hidden
+    (`CUDA_VISIBLE_DEVICES=""`), so the CUDA backend finds no device. Verified: 0 MiB.
+- **A punctuated prompt.** Whole-block transcription with whisper's VAD comes back all
+  lower case with no punctuation. Passing a punctuated opening line as the prompt
+  (`asr.REFINE_PRIMER`) restores it with the same words (`BUILD_NOTES.md` §4).
+- **Sentence-length lines.** Whisper's 2–3 s segments are merged: a line ends at a
+  sentence end once it is 60+ characters, at a pause of 2 s or more, or at ~300 characters.
+- **Quiet blocks are not refined** — under `notes.min_words` there is nothing to improve
+  (§7).
 - **Block audio** runs from the block's first utterance start to its last utterance end,
   padded. Utterance boundaries are silences, so a block never splits a word. Utterances
   belong to the block their start falls in (§7).
@@ -414,7 +431,8 @@ minutes would cost the GPU three times over. Blocks are stable, append-only and 
   do. Still strip `<think>…</think>` from every response (`llm.strip_thinking`).
 - **Sampling:** the batch app's thinking-off set — `temperature 0.7, top_p 0.8, top_k 20,
   min_p 0, presence_penalty 1.5`. `max_tokens` 600.
-- **Output:** see §9. Terse Markdown, rendered in the column.
+- **Output:** see §9 — a few plain paragraphs, rendered in the column under the block's
+  clock-time range (`2:30 – 2:35 PM`).
 
 **Edge cases:**
 
@@ -429,8 +447,9 @@ minutes would cost the GPU three times over. Blocks are stable, append-only and 
 - **Falling behind:** at most one call in flight and one queued. A third pending block
   means something is badly wrong — log it. At ~1,000 tokens in and ~300 out this should
   never happen (§8).
-- **Pending state:** while a block is waiting or generating, show it as a placeholder with
-  its time range, and in the column header show *"Next notes at 00:15:00"*.
+- **Pending state:** while a block is being refined or written, show it as a placeholder
+  with its time range — *"Tidying up the transcript…"*, then *"Writing notes…"* — and in
+  the column header *"Next notes at 2:35 PM"*.
 
 ### 7.1 Generate Full Summary
 
@@ -488,10 +507,10 @@ notes: those are terse, lossy and from the 3-bit model.
   the batch app). If IQ4_XS is absent, use IQ3_XXS and say so in the log. With Port, use
   the external server and load nothing.
 - **The batch app's tested path, restored rather than reinvented.** Its `chunker.py`
-  (`/tokenize`-based, ~10k-token chunks on utterance boundaries, 400-token overlap) and
+  (`/tokenize`-based, ~10k-token chunks on line boundaries, 400-token overlap) and
   `reduce.py` (map → group reduce when chunks exceed 8 → final reduce, recursive), with
-  their context guards. Take them from `NGJHD/Meeting-Summarizer` at commit `1559ecf` and
-  strip speakers, minutes mode and calibration.
+  their context guards — taken from `NGJHD/Meeting-Summarizer` at commit `1559ecf`,
+  stripped of speakers, minutes mode and calibration, and folded into `summary.py`.
 - **Map notes get up to 4,500 tokens, which in practice means no cut-off.** At the batch
   app's original 1,500 every map call hit the cap and stopped mid-notes, losing its last
   headings — Outcomes and Loose Ends, the decisions first. At 2,500 the longest notes still
@@ -507,8 +526,8 @@ notes: those are terse, lossy and from the 3-bit model.
 **The document:**
 
 ```
-# Meeting summary — <YYYY-MM-DD HH:MM>
-*Duration: <h m>*
+# Meeting summary — <meeting name, e.g. 11 Nov 2026, 14:30>
+*Duration: <1h 52m>*
 
 ## <Topic>
 <what was discussed, in paragraphs, ending with a sentence on how it ended:
@@ -527,15 +546,17 @@ Base everything on the transcript, flag ambiguity, and never invent a decision. 
 machine-translation caveat from §9 applies.
 
 **Progress.** A full-width panel replaces the Start/Stop controls. It shows:
-*"Saving transcript…"* → *"Loading the High Quality model (up to 2 minutes)…"* →
-*"Reading the meeting: part i of N"* → *"Writing the summary…"*. Use the batch app's
-asymptotic per-call progress (`1 − e^(−elapsed/expected)`), not `tokens/max_tokens`.
+*"Finishing the transcript…"* (live meeting only) → *"Loading the High Quality model (up
+to 2 minutes)…"* (or *"Connecting to the language model…"* with Port) → *"Reading the
+meeting: part i of N"* → *"Consolidating: part i of N"* (long meetings) → *"Writing the
+summary…"*. Use the batch app's asymptotic per-call progress (`1 − e^(−elapsed/expected)`),
+not `tokens/max_tokens`.
 
-**Cancel** is available throughout. It aborts the LLM work and unloads the model. The
-meeting stays in the history with its transcript and notes, the button is enabled again
-(it now works as for a past meeting), and Start stays available for a new meeting. Failure
-behaves like Cancel, plus *"The summary couldn't be written. The meeting's transcript is
-safe in the history."*
+**Cancel** is available throughout. It aborts the LLM work and unloads the model, quietly —
+no message (operator's choice). The meeting stays in the history with its transcript and
+notes, the button is enabled again (it now works as for a past meeting), and Start stays
+available for a new meeting. Failure leaves the same state, plus *"The summary couldn't be
+written. The meeting's transcript is safe in the history."*
 
 ---
 
@@ -561,15 +582,26 @@ over largely unchanged. What changes is sizing.
   accepted. The full summary (§7.1) does need 4-bit, and gets it: whisper is unloaded by
   then, so IQ4_XS has the whole card.
 
-**`hardware.py` must account for whisper.** Add a measured `WHISPER_RESERVE_GIB` and
-subtract it from VRAM before `choose_key`, `offload_regex` and the decision on whether
-`--spec-type draft-mtp` fits. High Quality is chosen automatically only if it fits *whole*,
-beside whisper, with its KV cache. On a 16 GB card that should resolve to Low Quality. On a
-24 GB card it may resolve to High. `llm.model` set explicitly still wins.
+**`hardware.py` budgets for whisper.** The live budget, in GiB on both sides, from
+measurements (`BUILD_NOTES.md` §2):
+
+| | GiB |
+|---|---|
+| `WHISPER_RESERVE_GIB` — turbo resident with its CUDA context | 1.9 |
+| `LIVE_OVERHEAD_GIB` — KV cache at 8k (q8_0) + compute buffers | 0.8 |
+| `MTP_GIB` — the draft context | 0.7 |
+| `DESKTOP_GIB` — what Windows already holds on the card | 0.5 |
+| `HEADROOM_GIB` — §16 test 8's floor | 0.5 |
+
+`choose_live_key` picks High Quality only if it fits *whole* beside whisper with all of
+the above; on a 16 GB card that is Low Quality, on a 24 GB card it would be High.
+`live_plan` offloads FFN blocks only if a model chosen by hand does not fit. The summary
+uses `summary_plan`: whisper is gone by then, so it gets the batch app's whole-card
+arithmetic (1.5 GiB overhead at 32k). `llm.model` set explicitly still wins.
 
 **MTP.** `--spec-type draft-mtp` (the model's own multi-token-prediction layer) costs about
-700 MiB and was worth about 50% generation speed in the batch app. Enable it only if it
-still fits with whisper resident. Measure both ways, since outputs here are short.
+700 MiB and was worth about 50% generation speed in the batch app. It is enabled only if it
+still fits with whisper resident — it does, on a 16 GB card with Low Quality.
 
 **No prompt cache in RAM.** Our llama-server runs with `--cache-ram 0`. This build caches
 past prompts in system RAM, 8 GiB by default, and none of ours repeat: over a 3h43m
@@ -592,22 +624,25 @@ takes 5–8 s. IQ4_XS also squeezes in beside whisper, but with only 0.33 GiB to
 no room for MTP, so it is not offered on one 16 GB card.
 
 **One card, even when there are several.** The target is a single 16 GB card. Where a
-machine has more than one NVIDIA GPU, put **both** servers on the one with the most VRAM —
-`--device` for llama-server, `-dev` for whisper-server — and never split them across cards.
-The operator decided this on 2026-10-30 so that the app behaves the same wherever it is
-deployed. A two-card split measured better (`BUILD_NOTES.md` §2, layout B), but it is not
-supported. Choose the card **by name and VRAM, never by index**: CUDA and `nvidia-smi`
-number the cards differently, and both servers default to CUDA device 0, which on the dev
-machine is the 10 GB card.
+machine has more than one NVIDIA GPU, **both** servers run on the one with the most VRAM,
+never split across cards. The operator decided this on 2026-10-30 so that the app behaves
+the same wherever it is deployed. A two-card split measured better (`BUILD_NOTES.md` §2,
+layout B), but it is not supported.
 
-**Lifecycle.** Start loads whisper-server and llama-server in parallel, with the message
-*"Loading models (up to a minute)…"*. **Then warm whisper up** with one inference on a
+The card is pinned **by its UUID, never by index**: `config.child_env` sets
+`CUDA_VISIBLE_DEVICES=<uuid>` for every GPU child, so each sees exactly that card as device
+0. CUDA and `nvidia-smi` number the cards differently, and both servers default to CUDA
+device 0, which on the dev machine is the 10 GB card — so `--device` / `-dev` indexes are
+not used at all.
+
+**Lifecycle.** Start loads both whisper-servers and llama-server in parallel, with the
+message *"Loading models (up to a minute)…"*. **Then warm whisper up** with one inference on a
 short noise clip before going live. On a GPU the CUDA build has no native kernels for
 (compute 12.0 against the CUDA 12.4 build), the first inference JIT-compiles for about a
 minute. Without a warm-up, the first utterance of the first meeting arrives a minute late
-and everything queues behind it. Stop keeps both loaded for `llm.idle_timeout_s`
-(300), so pressing Start again is instant. After that, both exit and the VRAM is released.
-Closing the app kills both, always (§12).
+and everything queues behind it. Stop keeps all three loaded for `llm.idle_timeout_s`
+(300), so pressing Start again is instant. After that, they exit and the VRAM is released.
+Closing the app kills them, always (§12).
 
 **GPU contention.** While a block summary generates (~10–20 s every 5 minutes), whisper
 shares the GPU. Expect utterance latency to rise during that window. Measure the worst case
@@ -680,12 +715,15 @@ it must be readable from a chair away and must not flicker.
 
 **Top bar:**
 
-1. **Microphone** dropdown — dshow devices. Remembered in `capture.device`.
+1. **Microphone** dropdown — dshow devices, re-listed each time it is opened. Remembered in
+   `capture.device`.
 2. **Model** dropdown — Low Quality / High Quality / Port, as in the batch app. Defaults to
-   detection (§8), except that Port is remembered.
+   detection (§8), except that Port is remembered. A model that is not downloaded is marked
+   and disabled; one that would not fit beside whisper is marked *(slower here)*. Port
+   reveals a port box.
 3. **Start / Stop** button — one button, two states. Disabled while models load.
-4. **Status** — *Loading models…* / *Listening* / *Stopped* / an error sentence, plus elapsed
-   session time.
+4. **Status** — *Loading models…* / *Listening* / *Microphone disconnected* / *Stopped* /
+   an error sentence, plus elapsed session time.
 5. **Level meter** — a thin bar directly under the Microphone dropdown, driven by §4's RMS.
    It is live whenever a microphone is selected, including before Start, so the user can
    check the mic first. (It was briefly a glow along the transcript's top edge; the
@@ -698,9 +736,10 @@ it must be readable from a chair away and must not flicker.
   while the user is at the bottom. If they scroll up, auto-scroll stops and a *Jump to live*
   button appears. New lines must not shift what the user is reading.
 - **Tabs on the transcript column: Transcript | Full Summary.** The Full Summary tab
-  exists only once a summary has been generated for the meeting on screen, and shows it
-  rendered. Without one, **Generate Full Summary** with its ⓘ tooltip (§7.1) sits below
-  the transcript.
+  exists only once a summary has been generated for the meeting on screen, shows it
+  rendered with a full line between paragraphs, and is the tab a past meeting **opens
+  on**. Without one, **Generate Full Summary** with its ⓘ tooltip (§7.1) sits below the
+  transcript, and *Transcript* is shown as a plain title rather than a lone tab.
 - **Right, ~35%: notes.** Blocks as in §7: appended at the bottom, all expanded, never
   removed. The pending block is shown as a placeholder at the bottom. Auto-scroll and
   *Jump to live* work as in the transcript column.
@@ -718,10 +757,14 @@ A collapsible sidebar on the **left**, listing every meeting in `output\`, newes
   summary. The live meeting sits at the top with a ● and a running duration.
 - **Clicking an entry** loads that meeting's transcript, notes and (if any) full summary
   into the two columns, **read-only**.
-- **Rename** (pencil icon, inline edit) changes the display name only. The folder name
-  never changes, so nothing can break by renaming.
-- **Delete** (bin icon) asks in-page *"Delete this meeting's transcript, notes and summary?
-  This can't be undone."* and removes the folder. The live meeting cannot be deleted.
+- **Rename** (the pencil icon, or right-click → Rename; inline edit) changes the display
+  name only. The folder name never changes, so nothing can break by renaming.
+- **Delete** is **only on right-click** → Delete — not a row icon, which was too easy to hit
+  (operator's choice). It asks in-page *"Delete this meeting's transcript, notes and
+  summary? This can't be undone."* and removes the folder. The live meeting cannot be
+  deleted.
+- **Collapsed**, the sidebar is a slim card with *HISTORY* written vertically, centred;
+  clicking it expands the sidebar again.
 - **Browsing while live is allowed.** Listening, transcription and notes carry on in the
   background, and a bar across the top reads **"● Live — back to meeting"**. Clicking the
   live entry or the bar returns to it. Start/Stop always act on the live meeting, never on
@@ -756,8 +799,9 @@ output\
 - **Folder name collision** (two Starts within the same minute): append ` (2)`.
 
 **Transport: Server-Sent Events** on `GET /api/events`. Event types: `status`, `level`,
-`utterance`, `block_pending`, `block`, `summary_progress`, `summary_done`, `error`. `GET /api/session` returns the full current
-state.
+`session`, `utterance`, `block_lines` (a refine swapping a block's lines), `block_pending`,
+`block`, `history`, `notice` (a passing message, e.g. the mic is back), `summary_progress`,
+`summary_done`. `GET /api/session` returns the full current state.
 
 **Reattaching.** On load the page fetches `/api/session`, renders everything, then attaches
 to the event stream. Closing the tab must not stop the session — the server keeps
@@ -792,40 +836,17 @@ running.
 
 ---
 
-## 13. WHAT TO STRIP FROM THE KEPT CODE
+## 13. WHAT WAS STRIPPED FROM THE BATCH APP (done)
 
-These carry batch-app concepts that no longer exist. Remove them as each file is brought up,
-and do not port them:
+Kept, cut down: `main.py` (routes, SSE, About, updates), `jobs.py` (process tracking, job
+log, cleanup, the kill-on-close Job Object), `hardware.py` (NVIDIA detection, model table,
+`model_gib`, FFN offload), `config.py` (load/merge/write, `write_atomic`, `meeting_dir`),
+`llm.py` (server lifecycle, Port, streaming chat, retries), `updater.py`, `version.py`,
+`open_browser.py`, the packaging scripts and the About overlay.
 
-- **`main.py`:** upload, start-job, speakers/rename, rebuild, mode routes,
-  `estimate_minutes`, disk-space checks. Keep `/`, static files, models, about, update,
-  health and the SSE plumbing. The batch `history` and `history/open` routes are a starting
-  point for §11.1's list and open, but the meeting folder format is new.
-- **`jobs.py`:** the staged `Job` with its stage weights, percentages and ETA. Keep process
-  tracking, the job log, `clean_temp`, `shutdown_all` and the Job Object code. Session state
-  moves to `session.py`.
-- **`hardware.py`:** the Vulkan probe, unified-memory handling, `_pick_device`, the coopmat
-  workaround, the CPU backend and `LEGACY_MODELS`. Keep `nvidia-smi` detection, the model
-  table, `model_gib`, `offload_regex` and `choose_key`, and add the whisper reserve (§8).
-- **`config.py`:** `REQUIRED_FILES`, `_DEFAULTS` and the backend-per-engine paths, all
-  rewritten for §14's schema. `migrate_flat_output` and the `ui.mode` helpers go.
-  `meeting_dir` and `write_atomic` stay for §11.1. `load_config` must keep merging new keys from `_DEFAULTS`, so an old
-  `config.json` loses nothing.
-- **`llm.py`:** `loading_message` and anything that reads `job.stage`. The rest stays.
-- **`version.py`:** already pointed at this repo. `EXPECTED_FILES` must list files that
-  exist here.
-- **`updater.py`:** the extra-model offer for the 1.0.x Q4_K_M migration.
-- **`web/`:** `app.js` is mostly rewritten. Keep the SSE reconnect logic, the About overlay
-  and the update flow. `style.css` largely carries.
-- **`run.bat`:** preflight for this file set (whisper-server, silero_vad.onnx, at least one
-  GGUF unless Port is on). Keep creating `output\`.
-- **`DOWNLOAD_MODELS.bat`:** drop the diarization models, the alignment model and the
-  Vulkan and CPU binaries. **Keep** `ggml-silero-v5.1.2.bin` for the refine pass (§6.1).
-  Add `silero_vad.onnx`, pinned to a release tag of
-  `snakers4/silero-vad`, never a branch head. Keep IQ4_XS as optional.
-- **`THIRD_PARTY_NOTICES.md`:** remove pyannote, sherpa-onnx, NeMo and wav2vec2. Add Silero
-  VAD (MIT).
-- **`tools/make_release.py`, `check_release.py`:** update the file lists and exclusions.
+Removed, and not to be ported back: upload, diarization, alignment, merge, speakers and
+renaming, minutes mode, calibration and ETAs, the Vulkan / CPU / unified-memory paths,
+`LEGACY_MODELS`, the 1.0.x model-migration offer, `server/audio.py`.
 
 ---
 
@@ -838,7 +859,6 @@ All tunables live in `config.json`. **There is no settings screen.** The UI writ
 {
   "capture": {
     "device": "",
-    "block_ms": 32,
     "replay_file": ""
   },
   "vad": {
@@ -899,58 +919,49 @@ All tunables live in `config.json`. **There is no settings screen.** The UI writ
 ```
 
 Everything marked `"auto"` is detected per machine. An explicit value always wins.
+`notes.min_words` does three jobs: the quietest block that still gets a note (§7), the
+shortest session kept in the history (§11.1), and the least transcript Generate Full
+Summary will accept (§7.1). `capture.replay_file` is for development only (§4).
+`tools/make_release.py` refuses to build with test values left in this file.
 
 ---
 
-## 15. BUILD ORDER
+## 15. HOW IT WAS BUILT
 
-Confirm each step before moving on. State as of 2026-11-11 in brackets.
+The order the app was built in, each step confirmed before the next. All done for v1.0.0.
 
-1. **Verify binaries** per §1. Obtain `whisper-server.exe`. Start `BUILD_NOTES.md`. [done]
-2. **Spike — this decides whether the design holds.** No UI. A script that loads
-   whisper-server and IQ3_XXS llama-server (ctx 8192) together, feeds a recorded meeting
-   through replay capture (§4) at real time, and fires one block summary mid-stream.
-   Record peak VRAM, utterance latency (median and worst) with and without the LLM call
-   running, and block-call time. Repeat with MTP on and off, and with IQ4_XS +
-   offload. **Report before going further.** [done — `BUILD_NOTES.md` §2]
-3. **Strip and boot** — cut `main.py`, `jobs.py`, `config.py` and `hardware.py` down (§13)
-   until the app starts and serves an empty two-column page with the About overlay. [done]
-4. **Capture + level meter + device list** — the meter moves when you speak. [done; level
-   verified on a replay through the room speaker, not yet with a person speaking]
-5. **VAD + whisper → transcript column** — live, with the hallucination filter. [done]
-5a. **Refine pass** (§6.1) — CPU whisper-server, block audio ring, line swap with scroll
-    anchoring. [done]
-6. **Block notes → notes column.** [done]
-7. **Stop, reattach, idle unload, shutdown, kill-on-close.** [stop, idle unload and clean
-   shutdown verified; reattach and force-quit not yet]
-7a. **Generate Full Summary** (§7.1): confirm modal, server-side Save dialog, transcript
-    file, model swap, restored chunker/reduce, summary file, Cancel. Verify the three-tier
-    path by lowering `summary.group_reduce_threshold` to 2 on a short replay. [done via the
-    API; the Save dialog and Cancel not yet tried by hand]
-8. **Long-session test** — 3 hours of replay. Memory, latency and block timing at hour three
-   match hour one. [done — 3h43m, `BUILD_NOTES.md` §6]
-9. **Packaging** — `run.bat`, `DOWNLOAD_MODELS.bat`, notices, release scripts, README.
-   [done; no release built or published yet]
-10. **Error message polish.** [not yet]
+1. Verify every binary's flags (§1); obtain `whisper-server.exe`.
+2. **Spike** — whisper and the LLM resident together on one card, fed a recording at real
+   time (`tools/spike.py`). This decided whether the design held (`BUILD_NOTES.md` §2).
+3. Strip the batch code down until the app boots (§13).
+4. Capture, the level meter and the device list.
+5. VAD + whisper → transcript; then the refine pass (§6.1).
+6. Block notes.
+7. Stop, reattach, idle unload, shutdown, kill-on-close; then Generate Full Summary, with
+   the multi-tier path forced on a short replay.
+8. A 3h43m replay (`BUILD_NOTES.md` §6).
+9. Packaging: `run.bat`, `DOWNLOAD_MODELS.bat`, notices, release scripts.
 
 ---
 
 ## 16. ACCEPTANCE TESTS
+
+Status of each, and how to run the ones that need a person, is in `TESTING.md`.
 
 1. **Latency:** median text-after-pause ≤ 2 s; worst case ≤ 5 s *while a block summary is
    generating*. Measured with replay over at least 30 minutes.
 2. **No lost speech:** over a 30-minute replay, every stretch of speech in the source
    produces transcript. Check by sampling ten points at random. A one-word utterance
    survives.
-3. **Silence:** 10 minutes of a quiet room produces no transcript lines at all.
+3. **Silence:** 10 minutes of a quiet room produces no transcript lines and no notes.
 4. **Mixed language:** a stretch of Mandarin-mixed speech produces readable English, not
    Chinese characters and not an empty line.
 5. **Blocks:** a block's notes appear within 3 minutes of its boundary (refine, then
    notes) and never change afterwards. The partial block appears after Stop.
-5a. **Refine:** over a 30-minute replay, every block's lines are replaced by refined ones.
-    Refined text against batch-style `whisper-cli` on the same audio is within about 35%
-    word error (live lines alone measured 50–68%). Live latency stays within test 1 while
-    a refine runs. The view does not jump when a block is swapped.
+   - **5a. Refine:** every block's lines are replaced by refined ones. Refined text
+     against batch-style `whisper-cli` on the same audio is within about 35% word error
+     (live lines alone measured 50–68%). Live latency stays within test 1 while a refine
+     runs. The view does not jump when a block is swapped.
 6. **Notes are grounded:** spot-check ten points against the transcript. No invented owners,
    deadlines or figures.
 7. **Three hours:** completes with flat memory (apart from transcript text), stable latency,
@@ -961,34 +972,34 @@ Confirm each step before moving on. State as of 2026-11-11 in brackets.
    notes and continues live.
 10. **Unplug the mic mid-session:** the red message appears within ~4 s and the meeting
     stays open; plug it back in (any port) and it carries on, with clock times still right.
-    Simulated by freezing ffmpeg: detected in 3.6 s, resumed 2 s after audio returned.
 11. **Force-quit the console:** no `ffmpeg.exe`, `whisper-server.exe` or `llama-server.exe`
     remains in Task Manager.
 12. **Network adapter disabled:** a full session runs.
 13. **Text in one place:** after a session, a distinctive word you said appears only under
     that meeting's `output\` folder (and in the summary copy, if made). Grep the whole app
-    folder for it, `temp\job.log` included. No audio file exists anywhere.
-16. **Full summary:** on a 1-hour replay, Generate Full Summary → confirm → Save writes the
-    copy to the Desktop with the default name and `summary.md` into the history folder. No
-    transcript is written beside the copy. The summary contains only topic sections, each
-    ending in a conclusion or "left open", and no speaker labels. Cancelling at the modal or
-    at the Save dialog leaves listening running.
+    folder for it, `temp\` included. No audio file exists anywhere.
+14. **Port:** with an external llama-server, notes are written by it and it is never killed.
+    If it leaves no room for whisper, a plain message appears, not a hang.
+15. **Portable:** copy the folder to another drive letter and it runs unchanged.
+16. **Full summary:** Generate Full Summary → confirm → Save writes the copy to the Desktop
+    with the default name and `summary.md` into the history folder. No transcript is
+    written beside the copy. The summary is topic sections in paragraphs, each ending with
+    how it concluded or that it was left open, and no speaker labels. Cancelling at the
+    modal or at the Save dialog leaves listening running.
 17. **Full summary, cancelled midway:** no summary file is written anywhere, no
     `llama-server.exe` remains, the meeting is in the history with its transcript, and
     Start begins a new session.
 18. **Save dialog in front:** the dialog appears above the browser window, not behind it.
 19. **History:** a finished meeting appears in the sidebar. Clicking it shows its
-    transcript, its notes and (if generated) a Full Summary tab. Rename survives a restart.
-    Delete removes the folder.
+    transcript, its notes and (if generated) the Full Summary tab. Rename survives a
+    restart. Right-click → Delete removes the folder.
 20. **Crash safety:** kill the console 20 minutes into a replay. On restart the meeting is
     in the history with every utterance up to the kill.
 21. **Browse while live:** open a past meeting mid-session. Transcription continues, the
     live bar shows, and going back shows every line spoken meanwhile.
 22. **Summary from the past:** a past meeting with no summary gets one, and the ✓ appears.
-23. **Mic check leaves nothing:** Start, say two words, Stop. No new history entry.
-14. **Port:** with an external llama-server, notes are written by it and it is never killed.
-    If it leaves no room for whisper, a plain message appears, not a hang.
-15. **Portable:** copy the folder to another drive letter and it runs unchanged.
+23. **Mic check leaves nothing:** Start, say two words, Stop. No new history entry, and the
+    notes column says so.
 
 ---
 
@@ -1000,6 +1011,7 @@ Confirm each step before moving on. State as of 2026-11-11 in brackets.
 - Do not hold transcript or notes back until Stop. Append as they happen (§11.1).
 - Do not add diarization or speaker labels, not even in the full summary.
 - Do not let Generate Full Summary resume listening afterwards. It ends the meeting.
+- Do not end a meeting because the mic dropped out. Wait for it (§4).
 - Do not switch recognition to language auto-detection or a Chinese-output model (§0
   scope).
 - Do not re-summarise a sliding window. Blocks are summarised once (§7).
@@ -1017,15 +1029,16 @@ Confirm each step before moving on. State as of 2026-11-11 in brackets.
 
 ---
 
-## 18. REPORT BACK ON COMPLETION
+## 18. WHERE THE MEASUREMENTS ARE
 
-- Every flag or request parameter from this document that differed in the shipped binaries,
-  and what was used instead.
-- Peak VRAM with both servers resident, idle and during a block call. The measured
-  `WHISPER_RESERVE_GIB`.
-- Utterance latency: median and worst, with and without a concurrent block call.
-- Block-call time and tokens/second, with MTP on and off.
-- Whether IQ4_XS fits beside whisper on the 16 GB card at ctx 8192 without offload, and
-  if not, the latency cost of using it with offload.
-- Memory growth over three hours.
-- Final unzipped folder size.
+What this spec originally asked to be reported back, and where each answer lives:
+
+| Question | Answer | Where |
+|---|---|---|
+| Flags that differed in the shipped binaries | none needed changing; `whisper-server.exe` had to be fetched | `BUILD_NOTES.md` §1 |
+| Peak VRAM, both servers resident | 13.9-14.4 GiB of 15.9 on a 16 GB card | §2, §5, §6 |
+| `WHISPER_RESERVE_GIB` | 1.9 | §2 |
+| Utterance latency | median 1.03-1.1 s; worst 1.8 s while a block generates | §2, §6 |
+| Block call time | 5-10 s, 26-47 tok/s; MTP on | §2, §5 |
+| IQ4_XS beside whisper at 8k | fits with only 0.33 GiB spare and no MTP — not offered | §2 |
+| Memory over three hours | flat, once llama-server's prompt cache was turned off | §6 |

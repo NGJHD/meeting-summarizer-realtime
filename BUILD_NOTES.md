@@ -30,13 +30,14 @@ investigated which step dropped it). `DOWNLOAD_MODELS.bat` now looks for
 **`llama-server.exe`** (`b10852`): `--device`, `--spec-type draft-mtp`, `--reasoning-budget`,
 `-ub`, `--flash-attn on`, `--no-webui`, `--override-tensor` all present.
 
-**`ffmpeg.exe`**: dshow demuxer has `-audio_buffer_size` (ms). Device capture is not yet
-tested — no microphone available.
+**`ffmpeg.exe`**: dshow demuxer has `-audio_buffer_size` (ms). Capture from a real USB mic
+verified in §3.
 
 **GPU ordering differs between tools.** On the dev machine, CUDA (`llama-server
 --list-devices`, `whisper-server -dev`) orders `CUDA0 = RTX 3080`, `CUDA1 = RTX 5060 Ti`,
-while `nvidia-smi` lists the 5060 Ti first. Never map one index onto the other; match by
-name.
+while `nvidia-smi` lists the 5060 Ti first. Never map one index onto the other. The app
+therefore uses neither index: it pins each GPU child to the chosen card with
+`CUDA_VISIBLE_DEVICES=<uuid>` (CLAUDE.md §8).
 
 **`bin\` must be on PATH** for both servers: `cudart64_12.dll` and the cuBLAS DLLs sit in
 `bin\`, not in the engine folders. Without it llama-server fails with
@@ -126,12 +127,11 @@ Consequences for the app:
   load.** Say so in the loading message rather than letting it look hung.
 - llama-server did not show the same delay. It loaded in 5–8 s from a warm disk cache.
 
-### Not yet measured
+### Measured later
 
-- Live microphone capture via dshow, including `-audio_buffer_size`.
-- A real 300 s block cadence over 3 hours (§16 test 7) — memory growth and drift.
-- IQ3_XXS vs IQ4_XS note quality on these blocks. Both runs' notes exist locally and
-  were not compared.
+- Live microphone capture via dshow: §3.
+- A real 300 s block cadence over 3h43m: §6.
+- Still not compared: IQ3_XXS against IQ4_XS note quality on the same blocks.
 
 ---
 
@@ -289,34 +289,7 @@ browser opened. Its desktop shortcut had an empty version stamp (`?v=`), a bug c
 over from the batch app, where a `for /f` command beginning with a quoted path loses its
 quotes. Fixed by prefixing `call`.
 
-### Acceptance tests (CLAUDE.md §16): what has run
-
-| # | Test | State |
-|---|---|---|
-| 1 | Latency | **passed** on replay (12 min; the spec asks for 30) |
-| 2 | No lost speech | not yet |
-| 3 | Silence produces no lines | not yet |
-| 4 | Mixed language comes out English | **passed** (0 CJK characters, replay and live mic) |
-| 5 | Blocks appear and never change | **passed** on replay |
-| 5a | Refine replaces lines; view does not jump | lines replaced, **passed**; the no-jump anchoring is untested by hand |
-| 6 | Notes are grounded | not yet spot-checked |
-| 7 | Three hours | **passed** -- 3h43m, see §6 (after the `--cache-ram 0` fix) |
-| 8 | VRAM headroom >= 0.5 GiB | **passed** (14,774 of 16,311 MiB) |
-| 9 | Reattach after closing the tab | not yet |
-| 10 | Unplug the mic mid-session | not yet |
-| 11 | Force-quit the console | not yet |
-| 12 | Network adapter disabled | not yet |
-| 13 | Text in one place | **passed** |
-| 14 | Port | **passed**, see §6 (Whisper's headroom beside the long-context launcher is thin) |
-| 15 | Portable to another drive | not yet |
-| 16 | Full summary | **passed** through the API; the Save dialog is untried by hand |
-| 17 | Full summary cancelled midway | not yet |
-| 18 | Save dialog in front of the browser | not yet -- needs a person |
-| 19 | History, rename, delete | partly: list, open and delete (API) verified; rename and right-click untried |
-| 20 | Crash safety | not yet |
-| 21 | Browse while live | not yet |
-| 22 | Summary from a past meeting | **passed** (the summary above was of a past meeting) |
-| 23 | Mic check leaves nothing | **passed** |
+Which acceptance tests have run, and their results, is tracked in `TESTING.md`.
 
 ---
 
@@ -403,3 +376,33 @@ Fuller notes mean the final prompt outgrows the 32k context from about six chunk
 
 - **Test 23:** a 24-second session was removed at Stop ("under 40 words, not kept").
 - **Test 19, partly:** delete through the app's API removed a meeting's folder.
+
+---
+
+## 7. Microphone dropouts (2026-11-11)
+
+**Unplugging the USB mic does not end ffmpeg's dshow capture.** The process stays alive and
+silent: no exit, nothing on stderr, no more audio on the pipe. Found by the operator
+unplugging the mic mid-meeting: the session ran on for two minutes having received 3 s of
+audio, still showing *Listening*.
+
+So capture watches the pipe instead (CLAUDE.md §4): a connected mic delivers frames
+continuously, silence included, so **3 s with no frames** means the device is gone (6 s
+grace before the first audio). The meeting stays open, the same mic is looked for every
+2 s by name, and the gap is filled with silence from the last frame received.
+
+Tested by freezing the session's ffmpeg process (`NtSuspendProcess`), which reproduces
+exactly what an unplug does to the pipe:
+
+| | |
+|---|---|
+| stall detected, message shown | 3.6-4.1 s after the freeze |
+| resumed after audio was available again | 2 s (the next device-list check) |
+| frozen ffmpeg left behind | none -- killed by the watchdog |
+| audio clock vs wall clock over the test | 18.0 s against 19.7 s |
+
+The first version counted the gap from when the stall was *noticed*, losing the ~3 s
+before it (15 s against 19.7 s). Counting from the last frame received fixed it. The
+remaining ~1.7 s is the mic's own start-up, once at Start and once at the reconnect.
+
+A real unplug-and-replug with the hardware is still to be confirmed (`TESTING.md`).

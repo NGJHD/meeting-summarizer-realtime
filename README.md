@@ -37,14 +37,18 @@ without a network connection.
 
 1. Double-click **`run.bat`**. Keep its black window open; closing it stops the app. The
    browser opens by itself.
-2. Pick the **Microphone**. The glowing line along the top of the transcript moves when it
-   hears sound — check it before the meeting starts. If the mic is plugged into a different
-   USB port next time, the app finds it again by name.
+2. Pick the **Microphone**. The thin bar under it moves when the mic hears sound — check it
+   before the meeting starts. If the mic is plugged into a different USB port next time,
+   the app finds it again by name.
 3. Press **Start**. The first start loads the models (up to a minute).
    - Lines appear in grey within a second or two of someone pausing.
    - Every 5 minutes, that block is transcribed again more carefully and the grey lines
-     are replaced with the cleaner text. A note about the block then appears on the right.
+     are replaced with the cleaner text. A short note about the block then appears on the
+     right. A block where almost nothing was said gets no note.
+   - If the microphone comes loose, a red message says so and the meeting waits. Plug it
+     back in — any USB port — and it carries on by itself.
 4. Press **Stop** when the meeting ends. The meeting is saved in the **History** sidebar.
+   If almost nothing was said, it is not saved, and the notes column says so.
 5. **Generate Full Summary** (below the transcript) stops listening if the meeting is still
    running, and writes a summary of the whole meeting: each topic discussed and how it
    ended. It is kept with the meeting, and a copy is saved wherever you choose (the Desktop
@@ -59,10 +63,13 @@ in Notepad — see `CLAUDE.md` §14 for what each value does.
 
 ## For developers
 
-`CLAUDE.md` is the specification and the reasoning behind every design decision.
-`BUILD_NOTES.md` has the measurements. `tools/spike.py` replays a recording through the
-pipeline at real time; setting `capture.replay_file` in `config.json` does the same inside
-the app.
+| File | What is in it |
+|---|---|
+| `CLAUDE.md` | The specification, and the reasoning behind every design decision |
+| `BUILD_NOTES.md` | The measurements behind those decisions |
+| `TESTING.md` | Acceptance tests, what has run, and how to replay a recording through the app |
+| `CHANGELOG.md` | What changed in each release |
+| `RELEASING.md` | How to build and publish a release |
 
 This app started from [Meeting-Summarizer](https://github.com/NGJHD/Meeting-Summarizer), the
 batch version that turns a recording into minutes.

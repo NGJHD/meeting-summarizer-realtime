@@ -1,7 +1,6 @@
 {
   "capture": {
     "device": "",
-    "block_ms": 32,
     "replay_file": ""
   },
   "vad": {
@@ -19,7 +18,12 @@
     "port": 8081,
     "carry_context": true,
     "max_queue": 4,
-    "drop_phrases": ["Thank you.", "Thanks for watching.", "you", "."],
+    "drop_phrases": [
+      "Thank you.",
+      "Thanks for watching.",
+      "you",
+      "."
+    ],
     "refine": true,
     "refine_port": 8082,
     "refine_threads": "auto",
@@ -55,7 +59,12 @@
     "startup_timeout_s": 180,
     "idle_timeout_s": 300,
     "spec_type": "auto",
-    "external": { "enabled": false, "port": 9931 }
+    "external": {
+      "enabled": false,
+      "port": 9931
+    }
   },
-  "server": { "port": 8000 }
+  "server": {
+    "port": 8000
+  }
 }

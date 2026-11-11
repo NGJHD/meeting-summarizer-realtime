@@ -1,7 +1,7 @@
 """App identity and version arithmetic.
 
 The only file that changes when this code is reused for a different app
-(BUILD_NOTES.md section 9q), and the only place the version number lives.
+(the batch app's BUILD_NOTES section 9q), and the only place the version number lives.
 
 Everything here is pure -- no network, no filesystem -- so the comparison logic
 can be exercised without downloading anything.
@@ -13,7 +13,7 @@ import re
 
 APP_NAME = "Meeting Transcriber Live"
 APP_AUTHOR = "Darren Ng"
-APP_VERSION = "0.1.0"
+APP_VERSION = "1.0.0"
 
 GITHUB_REPO = "NGJHD/meeting-summarizer-realtime"
 REPO_URL = "https://github.com/%s" % GITHUB_REPO
