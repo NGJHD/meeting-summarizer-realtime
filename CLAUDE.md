@@ -479,6 +479,9 @@ notes: those are terse, lossy and from the 3-bit model.
   `reduce.py` (map → group reduce when chunks exceed 8 → final reduce, recursive), with
   their context guards. Take them from `NGJHD/Meeting-Summarizer` at commit `1559ecf` and
   strip speakers, minutes mode and calibration.
+- **Map notes get 2,500 tokens, not the batch app's 1,500.** At 1,500 every map call hit
+  the cap and lost the end of its chunk; at 2,500 a 3h43m meeting's summary recorded half
+  as many decisions again (`BUILD_NOTES.md` §6).
 - **Sampling as in the batch app:** map and group-reduce run with thinking off. The final
   reduce runs with thinking on, `reasoning_effort` medium, `--reasoning-budget 4000`,
   `max_tokens` 12000, and the thinking-off retry on an empty `length` finish.
@@ -552,6 +555,10 @@ beside whisper, with its KV cache. On a 16 GB card that should resolve to Low Qu
 **MTP.** `--spec-type draft-mtp` (the model's own multi-token-prediction layer) costs about
 700 MiB and was worth about 50% generation speed in the batch app. Enable it only if it
 still fits with whisper resident. Measure both ways, since outputs here are short.
+
+**No prompt cache in RAM.** Our llama-server runs with `--cache-ram 0`. This build caches
+past prompts in system RAM, 8 GiB by default, and none of ours repeat: over a 3h43m
+meeting it grew the process from 11.6 to 19 GB for nothing (`BUILD_NOTES.md` §6).
 
 **Reasoning budget.** Thinking is off, so `--reasoning-budget` is irrelevant on our own
 server. Leave the code path in place: the Port option below may face a server whose
@@ -847,7 +854,7 @@ All tunables live in `config.json`. **There is no settings screen.** The UI writ
     "ctx_size": 32768,
     "target_tokens": 10000,
     "overlap_tokens": 400,
-    "max_map_output_tokens": 1500,
+    "max_map_output_tokens": 2500,
     "group_reduce_threshold": 8,
     "group_size": 5,
     "max_group_output_tokens": 2500,
@@ -903,7 +910,7 @@ Confirm each step before moving on. State as of 2026-11-11 in brackets.
     path by lowering `summary.group_reduce_threshold` to 2 on a short replay. [done via the
     API; the Save dialog and Cancel not yet tried by hand]
 8. **Long-session test** — 3 hours of replay. Memory, latency and block timing at hour three
-   match hour one. [not yet]
+   match hour one. [done — 3h43m, `BUILD_NOTES.md` §6]
 9. **Packaging** — `run.bat`, `DOWNLOAD_MODELS.bat`, notices, release scripts, README.
    [done; no release built or published yet]
 10. **Error message polish.** [not yet]

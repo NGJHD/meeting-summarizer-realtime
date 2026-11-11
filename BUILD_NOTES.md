@@ -300,20 +300,89 @@ quotes. Fixed by prefixing `call`.
 | 5 | Blocks appear and never change | **passed** on replay |
 | 5a | Refine replaces lines; view does not jump | lines replaced, **passed**; the no-jump anchoring is untested by hand |
 | 6 | Notes are grounded | not yet spot-checked |
-| 7 | Three hours | not yet |
+| 7 | Three hours | **passed** -- 3h43m, see §6 (after the `--cache-ram 0` fix) |
 | 8 | VRAM headroom >= 0.5 GiB | **passed** (14,774 of 16,311 MiB) |
 | 9 | Reattach after closing the tab | not yet |
 | 10 | Unplug the mic mid-session | not yet |
 | 11 | Force-quit the console | not yet |
 | 12 | Network adapter disabled | not yet |
 | 13 | Text in one place | **passed** |
-| 14 | Port | not yet |
+| 14 | Port | **passed**, see §6 (Whisper's headroom beside the long-context launcher is thin) |
 | 15 | Portable to another drive | not yet |
 | 16 | Full summary | **passed** through the API; the Save dialog is untried by hand |
 | 17 | Full summary cancelled midway | not yet |
 | 18 | Save dialog in front of the browser | not yet -- needs a person |
-| 19 | History, rename, delete | partly: list and open verified; rename and delete untried |
+| 19 | History, rename, delete | partly: list, open and delete (API) verified; rename and right-click untried |
 | 20 | Crash safety | not yet |
 | 21 | Browse while live | not yet |
 | 22 | Summary from a past meeting | **passed** (the summary above was of a past meeting) |
-| 23 | Mic check leaves nothing | not yet |
+| 23 | Mic check leaves nothing | **passed** |
+
+---
+
+## 6. Long session, Port mode, and the summary settings (2026-11-11)
+
+### 3h43m live session (CLAUDE.md §16 test 7)
+
+A single 3h43m recording of a public meeting held online, in English, replayed at real
+time through the whole app with the default settings (5-minute blocks, IQ3_XXS + MTP).
+1,374 transcript lines, 45 blocks.
+
+| | hour 1 | hour 2 | hour 3 | hour 4 (43 min) |
+|---|---|---|---|---|
+| utterances | 464 | 434 | 433 | 369 |
+| latency median | 1.04 s | 1.03 s | 1.05 s | 1.04 s |
+| latency p90 | 1.25 s | 1.22 s | 1.23 s | 1.22 s |
+| latency max | 2.07 s | 2.51 s | 2.00 s | 2.18 s |
+
+- **All 45 blocks** got notes; no refine fallbacks, no queue build-up.
+- Refine pass: up to 149 s per 5-minute block (of the 300 s available). Notes 4-9 s per
+  block, the same in the last hour as the first.
+- **App server memory flat** at ~100 MB. Both whisper servers flat. **VRAM flat**,
+  14.3-14.5 GiB.
+- **llama-server's system RAM grew 11.6 -> 19.0 GB.** This llama.cpp build caches past
+  prompts in RAM, 8 GiB by default (`--cache-ram`). Every prompt here is new -- each block,
+  chunk and reduce -- so it was pure waste. **Fixed: `--cache-ram 0`** on our own server.
+  Measured afterwards: 14.5 GB peak across a whole 3h43m full summary.
+
+### Port mode (test 14)
+
+Against the operator's own launcher -- IQ4_XS across both cards, 163,840 context.
+
+- Attached, and read the model and its context from `/props`.
+- **Whisper fitted beside it with 292 MiB to spare** on the 16 GB card. Works, but too
+  thin for comfort: anything else taking VRAM mid-meeting could stop transcription. A
+  smaller-context launch would leave more.
+- Notes written by that server with thinking off (130-150 tokens, 7-9 s).
+- Full summary through it: map 40 s, final 82 s with thinking on, `max_tokens` 24,000
+  (spare context on an external server, as designed).
+- **Never killed:** healthy after Stop and after the summary.
+
+### The map notes were being truncated
+
+The batch app's `max_map_output_tokens: 1500` was carried over. On this meeting **every
+map call ended at exactly 1,500 tokens**. The batch app's own logs show the same on every
+real meeting ("map calls run 1,500 tokens"), where it was read as their natural length;
+nothing there measured it as a cap.
+
+Same meeting, two full summaries, checked against its official minutes (37 agenda lines,
+25 recorded motions). Coverage counts the minutes' own words for each agenda item in the
+summary:
+
+| | cap 1,500 | cap 2,500 |
+|---|---|---|
+| map call lengths | 1,500 x 6 (all at the cap) | 1,877-2,500 (3 of 6 at the cap) |
+| final prompt | 9,820 tokens | 14,978 tokens (fits: + 12,000 + 2,000 < 32,768) |
+| topic sections / words | 14 / 4,607 | 16 / 4,895 |
+| decision wording (approved, carried, adopted...) | 24 | 36 |
+| agenda items in the back half of the meeting | thin | roughly doubled |
+| total time | 13 min | 17 min |
+
+The truncation fell on the end of each chunk, which is where later business sat. **Default
+is now 2,500.** Every topic of substance was present at 1,500 too, so this restores detail
+and decisions rather than whole topics.
+
+### Incidental passes
+
+- **Test 23:** a 24-second session was removed at Stop ("under 40 words, not kept").
+- **Test 19, partly:** delete through the app's API removed a meeting's folder.

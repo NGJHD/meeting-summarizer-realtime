@@ -135,6 +135,11 @@ class LlamaServer:
             "--parallel", "1",
             "--host", "127.0.0.1", "--port", str(self.port),
             "--no-webui",
+            # No prompt cache in system RAM. This build defaults to 8 GiB of it,
+            # and over a 3h43m meeting llama-server grew from 11.6 to 19.0 GB
+            # RSS caching prompts that are never sent twice: every block, chunk
+            # and reduce prompt is new (BUILD_NOTES section 5).
+            "--cache-ram", "0",
         ]
         threads = str(self.llm.get("threads", "auto"))
         if threads and threads != "auto":
