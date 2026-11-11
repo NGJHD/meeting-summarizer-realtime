@@ -405,7 +405,8 @@ The first version counted the gap from when the stall was *noticed*, losing the 
 before it (15 s against 19.7 s). Counting from the last frame received fixed it. The
 remaining ~1.7 s is the mic's own start-up, once at Start and once at the reconnect.
 
-A real unplug-and-replug with the hardware is still to be confirmed (`TESTING.md`).
+Confirmed by the operator with the real USB mic: unplugged mid-meeting, the message
+appeared, and the meeting carried on when it was plugged back in.
 
 ---
 

@@ -20,16 +20,16 @@ everything except the microphone itself.
 | 6 | Notes are grounded | not yet | Needs a person to spot-check against the transcript |
 | 7 | Three hours | **passed** | Replay, 3h43m; flat memory after `--cache-ram 0` (§6) |
 | 8 | VRAM headroom | **passed** | 14,774 of 16,311 MiB peak (§5) |
-| 9 | Reattach | partly | Reloading the page mid-meeting restored it and carried on. Closing and reopening the tab not tried |
-| 10 | Unplug the mic | partly | Simulated by freezing ffmpeg: detected in 3.6 s, resumed 2 s later (§7). Real unplug and replug to confirm |
-| 11 | Force-quit the console | not yet | Stopping the server cleanly left no child processes (§5); a force-quit not tried |
+| 9 | Reattach | **passed** | By the operator: tab closed mid-meeting and reopened; everything back and still live |
+| 10 | Unplug the mic | **passed** | By the operator with the real USB mic; also simulated by freezing ffmpeg: detected in 3.6 s, resumed 2 s later (§7) |
+| 11 | Force-quit the console | **passed** | By the operator: no child processes left behind |
 | 12 | Network adapter disabled | not yet | |
 | 13 | Text in one place | **passed** | A word from the meeting found only in its `output\` folder (§5) |
 | 14 | Port | **passed** | Against a long-context external server; never stopped (§6). Whisper's headroom there was thin |
 | 15 | Portable | not yet | |
 | 16 | Full summary | partly | Through the API on 12-minute and 3h43m meetings. The button and Save dialog used by the operator, not formally checked |
 | 17 | Summary cancelled midway | partly | Cancelled by the operator; the file and process checks not recorded |
-| 18 | Save dialog in front | not yet confirmed | |
+| 18 | Save dialog in front | **passed** | By the operator |
 | 19 | History | partly | List, open and delete (API) verified; rename after a restart and right-click by hand not confirmed |
 | 20 | Crash safety | not yet | |
 | 21 | Browse while live | not yet | |
