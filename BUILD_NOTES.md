@@ -232,3 +232,13 @@ large-v3-turbo, `-l en` and `--vad` with `ggml-silero-v5.1.2.bin`.
 - Chosen: **a second whisper-server, CPU-only, whole blocks** (CLAUDE.md §6.1). The GPU
   instance would serve one request at a time and stall live lines 5–10 s per block. A
   second GPU instance needs ~1.9 GiB that §2 shows is not there.
+
+### Refine output needs a punctuated prompt (2026-11-11)
+
+Whole-block transcription with whisper's VAD came back all lower case with no
+punctuation, in 2-3 s fragments: on a 5-minute block, 0 sentence marks and 6%
+capitalised words. A punctuated opening line passed as the prompt
+(`asr.REFINE_PRIMER`) restores it with the same words: 104 sentence marks, 94
+commas, 25% capitalised. The refine pass also merges whisper's segments into
+sentence-length lines (`session._sentence_lines`): a line ends at a sentence end
+once it is 60+ characters, at a pause of 2 s or more, or at about 300 characters.

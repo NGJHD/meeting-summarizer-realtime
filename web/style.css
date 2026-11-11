@@ -94,6 +94,10 @@ body {
   padding: 12px 18px;
   border-radius: var(--r-pane);
   flex: none;
+  /* backdrop-filter makes this a stacking context, so its tooltips can only
+     rise above the panes below if the bar itself does. */
+  position: relative;
+  z-index: 20;
 }
 .brand {
   font-family: var(--font-display);
@@ -202,6 +206,31 @@ input.port { width: 96px; }
 .sidebar.collapsed { width: 46px; }
 .sidebar.collapsed .history, .sidebar.collapsed #history-empty,
 .sidebar.collapsed .side-head span { display: none; }
+.sidebar.collapsed .side-head { justify-content: center; padding: 12px 0 4px; }
+.side-vertical { display: none; }
+.sidebar.collapsed .side-vertical {
+  display: flex; flex: 1; align-items: center; justify-content: center;
+  border: 0; background: transparent; cursor: pointer; padding: 0 0 18px;
+  color: var(--ink-soft); font: inherit; font-size: 13px; font-weight: 600;
+  letter-spacing: 0.32em; text-transform: uppercase;
+  writing-mode: vertical-rl; transform: rotate(180deg);
+}
+.sidebar.collapsed .side-vertical:hover { color: var(--ink); }
+
+/* Right-click menu on a history row. */
+.rowmenu {
+  position: fixed; z-index: 60; min-width: 150px; padding: 5px;
+  display: flex; flex-direction: column;
+  background: rgba(20, 34, 54, 0.9); border: 1px solid var(--glass-edge); border-radius: 12px;
+  backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+}
+.rowmenu button {
+  font: inherit; text-align: left; color: var(--ink); background: transparent; border: 0;
+  padding: 7px 12px; border-radius: 8px; cursor: pointer;
+}
+.rowmenu button:hover, .rowmenu button:focus-visible { background: rgba(255, 255, 255, 0.09); outline: none; }
+.rowmenu button.danger { color: var(--coral); }
 .side-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 14px 10px 8px 18px; font-size: 13px; color: var(--ink-soft); font-weight: 600;
@@ -319,7 +348,7 @@ input.port { width: 96px; }
 .doc h1 { font-family: var(--font-display); font-size: 26px; font-weight: 600; letter-spacing: -0.015em; margin: 8px 0 2px; }
 .doc h2 { font-family: var(--font-display); font-size: 19px; font-weight: 600; margin: 26px 0 6px; color: var(--mint); }
 .doc h3 { font-size: 16.5px; margin: 18px 0 4px; }
-.doc p { margin: 6px 0; max-width: 72ch; }
+.doc p { margin: 6px 0; }
 .doc em { color: var(--ink-soft); }
 .doc strong { color: #fff; }
 code { font-size: 0.92em; }

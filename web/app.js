@@ -343,7 +343,8 @@
     renderNotes();
     setTabs(m.has_summary);
     $("summary-view").innerHTML = m.has_summary ? renderMarkdown(m.summary) : "";
-    selectTab("transcript");
+    // A finished summary is what someone opening a past meeting came for.
+    selectTab(m.has_summary ? "summary" : "transcript");
     $("livebar").hidden = !(S.liveId && m.id !== S.liveId);
     markActiveRow();
     updateFooter();
@@ -707,18 +708,42 @@
     ren.textContent = "✎";
     ren.addEventListener("click", function (e) { e.stopPropagation(); renameRow(row, m); });
     row.appendChild(ren);
-    if (!isLive) {
-      var del = document.createElement("button");
-      del.className = "iconbtn";
-      del.type = "button";
-      del.title = "Delete";
-      del.textContent = "🗑";
-      del.addEventListener("click", function (e) { e.stopPropagation(); deleteRow(m); });
-      row.appendChild(del);
-    }
     row.addEventListener("click", function () { openMeeting(m.id); });
+    // Delete lives behind a right-click, not on the row: too easy to hit.
+    row.addEventListener("contextmenu", function (e) {
+      e.preventDefault();
+      openRowMenu(e.clientX, e.clientY, row, m, isLive);
+    });
     return row;
   }
+
+  function openRowMenu(x, y, row, m, isLive) {
+    var menu = $("rowmenu");
+    menu.innerHTML = "";
+    var items = [["Rename", function () { renameRow(row, m); }]];
+    if (!isLive) items.push(["Delete", function () { deleteRow(m); }, "danger"]);
+    items.forEach(function (it) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.textContent = it[0];
+      if (it[2]) b.className = it[2];
+      b.addEventListener("click", function () { closeRowMenu(); it[1](); });
+      menu.appendChild(b);
+    });
+    menu.hidden = false;
+    var w = menu.offsetWidth, h = menu.offsetHeight;
+    menu.style.left = Math.min(x, window.innerWidth - w - 8) + "px";
+    menu.style.top = Math.min(y, window.innerHeight - h - 8) + "px";
+    menu.firstChild.focus();
+  }
+
+  function closeRowMenu() { $("rowmenu").hidden = true; }
+
+  document.addEventListener("click", function (e) {
+    if (!$("rowmenu").hidden && !$("rowmenu").contains(e.target)) closeRowMenu();
+  });
+  window.addEventListener("blur", closeRowMenu);
+  window.addEventListener("resize", closeRowMenu);
 
   function markActiveRow() {
     var id = S.view ? S.view.id : "";
@@ -778,11 +803,15 @@
     });
   }
 
-  $("side-toggle").addEventListener("click", function () {
+  function toggleSidebar() {
     var side = $("sidebar");
     side.classList.toggle("collapsed");
-    $("side-toggle").textContent = side.classList.contains("collapsed") ? "›" : "‹";
-  });
+    var collapsed = side.classList.contains("collapsed");
+    $("side-toggle").textContent = collapsed ? "›" : "‹";
+    $("side-toggle").setAttribute("aria-label", collapsed ? "Expand history" : "Collapse history");
+  }
+  $("side-toggle").addEventListener("click", toggleSidebar);
+  $("side-vertical").addEventListener("click", toggleSidebar);
 
   /* ---------------------------------------------------------------- modal */
 
@@ -928,7 +957,8 @@
   $("about").addEventListener("click", function (e) { if (e.target === $("about")) closeAbout(); });
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape") return;
-    if (!$("modal").hidden) closeModal(false);
+    if (!$("rowmenu").hidden) closeRowMenu();
+    else if (!$("modal").hidden) closeModal(false);
     else if (!$("about").hidden) closeAbout();
   });
 

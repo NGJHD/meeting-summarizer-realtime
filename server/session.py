@@ -479,7 +479,7 @@ class Session:
             t0 = time.time()
             if cpu is not None and len(audio):
                 try:
-                    segs = cpu.infer(audio, "", timeout=900)
+                    segs = cpu.infer(audio, asr.REFINE_PRIMER, timeout=900)
                     segs, dropped = asr.clean_segments(segs, len(audio) / SR, self.cfg)
                     self._replace_block(k, a0, segs)
                     ok = True
@@ -505,9 +505,9 @@ class Session:
                 new = old
             else:
                 new = []
-                for s in segs:
-                    new.append({"id": self._next_id, "t": round(a0 + s["start"], 2),
-                                "text": s["text"], "refined": True, "block": k})
+                for t, text in _sentence_lines(segs):
+                    new.append({"id": self._next_id, "t": round(a0 + t, 2),
+                                "text": text, "refined": True, "block": k})
                     self._next_id += 1
                 kept = [l for l in self.lines if l["block"] != k]
                 # Lines of later blocks that arrived meanwhile stay after these.
@@ -591,6 +591,31 @@ class Session:
     def words(self) -> int:
         with self.lock:
             return sum(len(l["text"].split()) for l in self.lines)
+
+
+def _sentence_lines(segs: list[dict]) -> list[tuple[float, str]]:
+    """Whisper's 2-3 s segments, merged into lines that read like sentences.
+
+    A line ends where a sentence ends and it has some length to it, at a pause
+    of 2 s or more, or at about 300 characters -- whichever comes first.
+    """
+    out: list[tuple[float, str]] = []
+    start, parts, last_end = 0.0, [], 0.0
+    for s in segs:
+        if parts and (s["start"] - last_end >= 2.0):
+            out.append((start, " ".join(parts)))
+            parts = []
+        if not parts:
+            start = s["start"]
+        parts.append(s["text"].strip())
+        last_end = s["end"]
+        text = " ".join(parts)
+        if (len(text) >= 60 and text[-1:] in ".?!") or len(text) >= 300:
+            out.append((start, text))
+            parts = []
+    if parts:
+        out.append((start, " ".join(parts)))
+    return out
 
 
 _last_level = [0.0]

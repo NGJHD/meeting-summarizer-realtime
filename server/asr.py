@@ -37,6 +37,14 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 SR = 16000
 ASR_FAILED = "Speech recognition could not be started."
 
+# Context for the refine pass. Whole-block transcription with whisper's own VAD
+# comes back all lower case with no punctuation -- measured on a 5-minute
+# block: 0 sentence marks, 6% capitalised words. A punctuated opening line as
+# the prompt is enough to restore it: 104 sentence marks, 25% capitalised, the
+# same words (BUILD_NOTES section 4). It conditions style only; it is never output.
+REFINE_PRIMER = ("Good morning, everyone. Thanks for joining. "
+                 "Let's get started with the first item on the agenda.")
+
 
 def wav_bytes(pcm: np.ndarray) -> bytes:
     b = io.BytesIO()
