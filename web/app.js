@@ -114,6 +114,7 @@
   }
 
   function init() {
+    setTabs(false);
     loadDevices(true);
     loadModels();
     loadSession();

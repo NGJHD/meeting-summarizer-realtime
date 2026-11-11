@@ -346,9 +346,11 @@ input.port { width: 96px; }
 
 .doc { font-size: 16.5px; line-height: 1.68; }
 .doc h1 { font-family: var(--font-display); font-size: 26px; font-weight: 600; letter-spacing: -0.015em; margin: 8px 0 2px; }
-.doc h2 { font-family: var(--font-display); font-size: 19px; font-weight: 600; margin: 26px 0 6px; color: var(--mint); }
+.doc h2 { font-family: var(--font-display); font-size: 19px; font-weight: 600; margin: 40px 0 10px; color: var(--mint); }
 .doc h3 { font-size: 16.5px; margin: 18px 0 4px; }
-.doc p { margin: 6px 0; }
+/* A full line of space between paragraphs: a topic often runs to several, and at
+   6px they read as one wall of text. */
+.doc p { margin: 0 0 1.1em; }
 .doc em { color: var(--ink-soft); }
 .doc strong { color: #fff; }
 code { font-size: 0.92em; }
