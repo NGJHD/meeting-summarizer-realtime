@@ -20,7 +20,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
                                StreamingResponse)
 
-from . import config, hardware, history, jobs, llm, summary, updater, version
+from . import capture, config, hardware, history, jobs, llm, summary, updater, version
 from .session import app as live, bus, engines, monitor
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -34,11 +34,20 @@ def _prime_hardware() -> None:
 
 
 def _monitor_watchdog() -> None:
-    """Release the mic when no page is listening (section 11)."""
+    """The pre-Start level meter: release the mic when no page is listening, and
+    pick it up again when it comes back after being unplugged (section 4)."""
     while True:
-        time.sleep(15)
-        if bus.listeners == 0:
-            monitor.stop()
+        time.sleep(5)
+        try:
+            if bus.listeners == 0:
+                monitor.stop()
+            elif live.state == "idle" and monitor.capture is None and live.device:
+                target = capture.normalise(live.device)
+                found = [d for d in capture.list_devices() if capture.normalise(d) == target]
+                if len(found) == 1:
+                    monitor.start(found[0])
+        except Exception as exc:  # noqa: BLE001 - the meter is never worth a crash
+            jobs.log_exception(exc)
 
 
 @asynccontextmanager

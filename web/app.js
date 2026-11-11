@@ -71,6 +71,16 @@
     el.hidden = !text;
   }
 
+  // A passing message: shown, then cleared unless something else replaced it.
+  var noticeTimer = null;
+  function notice(text) {
+    banner(text);
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(function () {
+      if ($("banner").textContent === text) banner("");
+    }, 10000);
+  }
+
   function words(lines) {
     var n = 0;
     (lines || []).forEach(function (l) { n += (l.text || "").split(/\s+/).filter(Boolean).length; });
@@ -167,6 +177,7 @@
       case "summary_progress": onSummaryProgress(ev); break;
       case "summary_done": onSummaryDone(ev); break;
       case "error": banner(ev.message, "error"); break;
+      case "notice": notice(ev.message); break;
     }
   }
 
@@ -197,8 +208,10 @@
     $("port").disabled = state !== "idle";
 
     var dot = $("status-dot");
-    dot.className = "dot" + (state === "live" ? " live" : state === "idle" ? "" : " busy");
-    var text = state === "live" ? "Listening" : state === "loading" ? (st.message || "Loading models…")
+    dot.className = "dot" + (state === "live" && !st.mic_lost ? " live"
+      : state === "idle" || st.mic_lost ? "" : " busy");
+    var text = state === "live" && st.mic_lost ? "Microphone disconnected"
+      : state === "live" ? "Listening" : state === "loading" ? (st.message || "Loading models…")
       : state === "stopping" ? (st.message || "Finishing up…")
       : state === "summarizing" ? "Writing the full summary" : "Stopped";
     $("status-text").textContent = text;
@@ -207,6 +220,7 @@
     $("summary-panel").hidden = state !== "summarizing";
 
     if (state === "idle" && st.message) banner(st.message, "error");
+    else if (state === "live" && st.mic_lost) banner(st.warning, "error");
     else if (state === "live" && st.warning) banner(st.warning);
     else if (state === "live" && prev !== "live") banner(S.deviceMessage || "");
     else if (state === "loading") banner("");
@@ -649,7 +663,7 @@
     } else if (ev.state === "failed") {
       banner(ev.message, "error");
     } else if (ev.state === "cancelled") {
-      banner("The summary was cancelled. The meeting is still in the history.");
+      banner("");
     }
     if (S.view && S.view.id === ev.id && S.view.live) S.view.live = false;
     updateFooter();

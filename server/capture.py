@@ -26,6 +26,12 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 SR = 16000
 FRAME = 512                      # 32 ms at 16 kHz -- Silero v5's frame
 LEVEL_INTERVAL_S = 0.2           # ~5 Hz to the meter
+# A live mic delivers audio continuously, silence included. Unplugged, ffmpeg's
+# dshow input does not exit or report anything -- it just stops delivering
+# (measured with a USB mic). So silence on the pipe for this long means the
+# device is gone. The first audio gets longer: dshow can take a moment to open.
+STALL_S = 3.0
+FIRST_AUDIO_GRACE_S = 6.0
 
 _DEVICE_RE = re.compile(r'"([^"]+)"\s+\(audio\)')
 # Windows' instance numbering for a second copy of the same device, as in
@@ -126,13 +132,16 @@ class Capture:
 
     `on_frame(pcm_int16, frame_index)` is called for every 32 ms frame on the
     reader thread. `on_level(rms_dbfs)` about five times a second. `on_end()`
-    once, if ffmpeg ends without stop() having been called -- the mic was
-    unplugged, or the replay file ran out.
+    once, if capture ends without stop() having been called -- the mic was
+    unplugged (seen as a stall, see STALL_S), or the replay file ran out.
+
+    `start_frame` continues the frame count from an earlier capture, so a mic
+    that is reconnected mid-meeting carries on the same timeline.
     """
 
     def __init__(self, task: Task, device: str, replay_file: str = "",
                  on_frame: Optional[Callable] = None, on_level: Optional[Callable] = None,
-                 on_end: Optional[Callable] = None):
+                 on_end: Optional[Callable] = None, start_frame: int = 0):
         self.task = task
         self.device = device
         self.replay_file = replay_file
@@ -141,8 +150,11 @@ class Capture:
         self.on_end = on_end
         self.proc: Optional[subprocess.Popen] = None
         self._thread: Optional[threading.Thread] = None
+        self._watchdog: Optional[threading.Thread] = None
         self._stopping = threading.Event()
-        self.frames = 0
+        self.frames = start_frame
+        self.stalled = False
+        self._last_audio = 0.0
 
     def command(self) -> list[str]:
         if self.replay_file:
@@ -158,8 +170,26 @@ class Capture:
             stdin=subprocess.DEVNULL, bufsize=0,
             creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
         self.task.register_proc(self.proc)
+        self._last_audio = time.time() + (FIRST_AUDIO_GRACE_S - STALL_S)
         self._thread = threading.Thread(target=self._read, name="capture", daemon=True)
         self._thread.start()
+        if not self.replay_file:
+            self._watchdog = threading.Thread(target=self._watch, name="capture-watch",
+                                              daemon=True)
+            self._watchdog.start()
+
+    def _watch(self) -> None:
+        """Kill ffmpeg when the mic stops delivering; the reader then ends normally."""
+        while not self._stopping.is_set():
+            time.sleep(0.5)
+            proc = self.proc
+            if proc is None or proc.poll() is not None:
+                return
+            if time.time() - self._last_audio > STALL_S:
+                self.stalled = True
+                self.task.log("capture: no audio for %.0fs -- microphone lost" % STALL_S)
+                kill_tree(proc)
+                return
 
     def _read(self) -> None:
         need = FRAME * 2
@@ -177,6 +207,7 @@ class Capture:
                     continue
                 pcm = np.frombuffer(buf, dtype=np.int16)
                 buf = b""
+                self._last_audio = time.time()
                 if self.on_frame is not None:
                     self.on_frame(pcm, self.frames)
                 self.frames += 1
@@ -198,12 +229,18 @@ class Capture:
                 self.on_end()
 
     def stop(self) -> None:
+        """Stop on purpose. on_end is not called."""
         self._stopping.set()
         proc = self.proc
         if proc is not None:
             kill_tree(proc)
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=5)
+
+    @property
+    def last_audio(self) -> float:
+        """Wall time the last audio arrived (0 if none has)."""
+        return self._last_audio if self.frames else 0.0
 
     @property
     def seconds(self) -> float:

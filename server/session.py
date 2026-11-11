@@ -27,7 +27,9 @@ from .jobs import JobError, Task
 SR = 16000
 
 NO_MIC = "No microphone found. Plug one in."
-MIC_LOST = "The microphone was disconnected."
+MIC_LOST = ("The microphone was disconnected. Plug it back in and the meeting will "
+            "carry on.")
+NOT_KEPT = "Very little was said, so this one wasn't saved to History."
 FALLING_BEHIND = "Transcription is falling behind."
 NOT_ENOUGH_VRAM = ("Not enough video memory for transcription alongside the model "
                    "on port %d.")
@@ -279,6 +281,10 @@ class Session:
         self.silero = vad.Silero(config.resolve(cfg["vad"].get("model", "models/silero_vad.onnx")))
         self.segmenter = vad.Segmenter.from_config(cfg["vad"])
         self.ring = AudioRing()
+        self.next_frame = 0
+        self.mic_lost = False
+        self.lost_at = 0.0
+        self._cap_lock = threading.Lock()
         self.cur_block = 0
         self.pending_close: list[int] = []
         self.refine_busy = False
@@ -310,22 +316,80 @@ class Session:
         self.task.log("session: listening (%s)" % ("replay" if self.replay else "microphone"))
 
     def _on_capture_end(self) -> None:
-        """ffmpeg ended without Stop: replay finished, or the mic was unplugged."""
+        """Capture ended without Stop: the replay ran out, or the mic went away.
+
+        A lost mic does not end the meeting. A loose USB cable is the likeliest
+        cause, so the meeting stays open, says so, and carries on by itself when
+        the same mic comes back -- on any port. It never switches to a different
+        mic on its own (section 4).
+        """
         if self.state != "live":
             return
-        if not self.replay:
-            self.task.log("session: capture ended -- microphone disconnected")
-            bus.emit({"type": "error", "message": MIC_LOST})
-        threading.Thread(target=app.stop, name="stop", daemon=True).start()
+        if self.replay:
+            threading.Thread(target=app.stop, name="stop", daemon=True).start()
+            return
+        with self._cap_lock:
+            self.mic_lost = True
+            # When audio actually stopped, not when the stall was noticed: the
+            # gap filled with silence must cover the whole silent stretch.
+            self.lost_at = min(time.time(), self.capture.last_audio or time.time())
+            utt = self.segmenter.flush()      # what was said up to the drop
+            if utt is not None:
+                self.asr_q.put(("utt", utt))
+        self.task.log("session: microphone lost; waiting for it to come back")
+        bus.emit({"type": "status", **app.status()})
+        threading.Thread(target=self._reconnect, name="reconnect", daemon=True).start()
+
+    def _reconnect(self) -> None:
+        target = capture.normalise(self.device)
+        while self.state == "live" and self.mic_lost:
+            time.sleep(2.0)
+            if self.state != "live":
+                return
+            found = [d for d in capture.list_devices() if capture.normalise(d) == target]
+            if len(found) != 1:
+                continue
+            with self._cap_lock:
+                if self.state != "live":
+                    return
+                gap = max(0.0, time.time() - self.lost_at)
+                self._fill_silence(gap)
+                self.device = found[0]
+                cap = capture.Capture(self.task, self.device, on_frame=self._on_frame,
+                                      on_level=_emit_level, on_end=self._on_capture_end,
+                                      start_frame=self.next_frame)
+                try:
+                    cap.start()
+                except OSError as exc:
+                    jobs.log_exception(exc)
+                    continue
+                self.capture = cap
+                self.mic_lost = False
+            self.task.log("session: microphone back after %.0fs" % gap)
+            bus.emit({"type": "status", **app.status()})
+            bus.emit({"type": "notice", "message": "The microphone is back. Carrying on."})
+            return
+
+    def _fill_silence(self, seconds: float) -> None:
+        """Count the disconnected time as silence, so clock times stay right.
+
+        Session time comes from the sample count (section 5). Without this, every
+        line after a reconnect would be stamped as early as the gap was long.
+        """
+        silence = np.zeros(capture.FRAME, dtype=np.int16)
+        for _ in range(int(seconds * SR / capture.FRAME)):
+            self._on_frame(silence, self.next_frame, speech_p=0.0)
 
     def stop(self, for_summary: bool = False) -> None:
         """Flush, refine the partial block, write its notes (unless summarising)."""
         if self.state != "live":
             return
-        self.state = "stopping"
+        with self._cap_lock:
+            self.state = "stopping"
+            self.mic_lost = False
         self.skip_notes = for_summary
         self.capture.stop()
-        end_s = self.capture.seconds
+        end_s = self.next_frame * capture.FRAME / SR
         utt = self.segmenter.flush()
         if utt is not None:
             self.asr_q.put(("utt", utt))
@@ -343,9 +407,10 @@ class Session:
 
     # -- capture thread --------------------------------------------------
 
-    def _on_frame(self, pcm: np.ndarray, idx: int) -> None:
+    def _on_frame(self, pcm: np.ndarray, idx: int, speech_p: Optional[float] = None) -> None:
         self.ring.append(pcm)
-        p = self.silero.prob(pcm)
+        self.next_frame = idx + 1
+        p = self.silero.prob(pcm) if speech_p is None else speech_p
         utt = self.segmenter.push(pcm, p, idx, time.time())
         if utt is not None:
             self.asr_q.put(("utt", utt))
@@ -696,8 +761,10 @@ class App:
         s = self.session
         warning = ""
         if s is not None and s.state == "live":
-            warning = FALLING_BEHIND if s.behind else s.warning
+            warning = (MIC_LOST if s.mic_lost else FALLING_BEHIND if s.behind
+                       else s.warning)
         return {"state": self.state, "message": self.message, "warning": warning,
+                "mic_lost": bool(s is not None and s.mic_lost),
                 "device": self.device, "device_how": self.device_how,
                 "live_id": s.meeting.id if s is not None and s.state == "live" else "",
                 "engines_loaded": engines.loaded}
@@ -772,6 +839,7 @@ class App:
         if not for_summary and s.meeting.word_count() < s.min_words:
             history.delete(s.meeting.id)
             jobs.log("session: under %d words, not kept" % s.min_words)
+            bus.emit({"type": "notice", "message": NOT_KEPT})
         cfg = config.load_config()
         if not for_summary:
             engines.schedule_idle_stop(float(cfg["llm"].get("idle_timeout_s", 300)))

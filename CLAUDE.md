@@ -227,9 +227,21 @@ bin\ffmpeg.exe -hide_banner -loglevel error ^
 - **Level meter.** Compute RMS per block and publish at ~5 Hz. This is the user's only way
   to know the right microphone is selected and actually hearing the room, before anything
   has been transcribed.
-- **Mic disappears mid-session** (USB unplugged): ffmpeg exits. Stop the session cleanly,
-  keep what is on screen, and say *"The microphone was disconnected."* Do not restart
-  silently on another device.
+- **Mic disappears mid-session** (USB unplugged, loose cable). **ffmpeg does not exit** —
+  dshow just stops delivering audio, with nothing on stderr (measured with the operator's USB
+  mic). So capture watches for a stall: a live mic delivers audio continuously, silence
+  included, so **3 s with no audio means the mic is gone** (6 s grace for the first audio).
+  Then:
+  - **The meeting stays open.** The status reads *Microphone disconnected* and a red banner
+    says *"The microphone was disconnected. Plug it back in and the meeting will carry
+    on."* What was said up to the drop is transcribed as usual.
+  - **It resumes by itself when the same mic comes back**, matched by name as in §4 (so on
+    any USB port), checked every 2 s. Never on a different device.
+  - **The gap counts as silence** — from the last audio received, not from when the stall
+    was noticed — so clock times after a reconnect stay right (to within the mic's own
+    ~1 s start-up).
+  - Stop works throughout. The operator chose this over ending the meeting on a dropout
+    (2026-11-11): a loose USB cable must not end a meeting.
 - **Replay mode, for development only.** `capture.replay_file` (default `""`), when set,
   replaces the dshow input with `-re -i "<file>"`: the same pipe, paced at real time, from
   a recording. It is how every latency and long-session test in §16 is run reproducibly
@@ -944,8 +956,9 @@ Confirm each step before moving on. State as of 2026-11-11 in brackets.
    card's total with at least 0.5 GiB to spare.
 9. **Reattach:** closing and reopening the tab mid-session shows the full transcript and
    notes and continues live.
-10. **Unplug the mic mid-session:** a plain message, the session stops, on-screen content is
-    kept, the app remains usable.
+10. **Unplug the mic mid-session:** the red message appears within ~4 s and the meeting
+    stays open; plug it back in (any port) and it carries on, with clock times still right.
+    Simulated by freezing ffmpeg: detected in 3.6 s, resumed 2 s after audio returned.
 11. **Force-quit the console:** no `ffmpeg.exe`, `whisper-server.exe` or `llama-server.exe`
     remains in Task Manager.
 12. **Network adapter disabled:** a full session runs.
