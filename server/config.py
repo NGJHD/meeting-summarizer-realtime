@@ -1,7 +1,8 @@
 """Paths, config loading and the child-process environment.
 
 Everything the app touches lives under ROOT so the folder stays portable
-(CLAUDE.md section 16: nothing is written outside the app directory).
+(CLAUDE.md section 17: nothing is written outside the app directory, apart
+from a summary copy the user explicitly saves somewhere).
 """
 
 from __future__ import annotations
@@ -19,120 +20,28 @@ WEB = ROOT / "web"
 TEMP = ROOT / "temp"
 OUTPUT = ROOT / "output"
 
-# whisper.cpp and llama.cpp ship *different* builds of ggml.dll, ggml-base.dll
-# and ggml-cuda.dll. They cannot share a directory, so each engine keeps its own
-# (see BUILD_NOTES.md). Windows searches the executable's own directory first,
-# so each picks up the right DLLs; the shared CUDA runtime sits in bin\.
-#
-# There is now a second dimension: one folder per backend. CUDA where the
-# machine has an NVIDIA card, Vulkan for AMD and Intel (and as a fallback
-# anywhere), CPU as the last resort.
-#
-#     bin\llama-cuda    bin\llama-vulkan    bin\llama-cpu
-#     bin\whisper-cuda  bin\whisper-vulkan  bin\whisper-cpu
 FFMPEG = BIN / "ffmpeg.exe"
-
-# Older installs had bin\llama\ and bin\whisper\ with no backend suffix.
-LEGACY_DIRS = {"llama": BIN / "llama", "whisper": BIN / "whisper"}
-
-
-def engine_dir(engine: str, backend: str) -> Path:
-    """Where this engine's binaries live for a given backend."""
-    candidate = BIN / ("%s-%s" % (engine, backend))
-    if candidate.is_dir():
-        return candidate
-    legacy = LEGACY_DIRS.get(engine)
-    if legacy is not None and legacy.is_dir():
-        return legacy
-    return candidate
-
-
-def llama_server_path(backend: str) -> Path:
-    return engine_dir("llama", backend) / "llama-server.exe"
-
-
-def whisper_cli_path(backend: str) -> Path:
-    return engine_dir("whisper", backend) / "whisper-cli.exe"
-
-
-_backend_cache: dict = {}
-
-
-def backend(engine: str = "llama") -> str:
-    """The backend this engine will actually use, honouring config.json.
-
-    Per engine, not per machine: whisper and llama are not shipped in step.
-
-    Memoised. It reads config.json and stats the binary folders, and the ETA
-    asks for it on every progress event; config.json is read once at startup
-    anyway, so nothing here can change without a restart.
-    """
-    if engine in _backend_cache:
-        return _backend_cache[engine]
-    from . import hardware
-
-    try:
-        requested = str(load_config().get("gpu", {}).get("backend", "auto"))
-    except RuntimeError:
-        requested = "auto"
-    _backend_cache[engine] = hardware.resolve_backend(engine, requested)
-    return _backend_cache[engine]
-
-
-class _BackendPath:
-    """`config.WHISPER_CLI` used to be a constant; it is now a lookup.
-
-    Kept as an attribute-compatible object so every existing `str(...)`,
-    `.exists()` and `.parent` call site keeps working, rather than touching
-    every caller to thread a backend through.
-    """
-
-    def __init__(self, engine: str, resolver):
-        self._engine = engine
-        self._resolver = resolver
-
-    def _p(self) -> Path:
-        return self._resolver(backend(self._engine))
-
-    def __getattr__(self, name):
-        return getattr(self._p(), name)
-
-    def __fspath__(self) -> str:
-        return str(self._p())
-
-    def __str__(self) -> str:
-        return str(self._p())
-
-    def __truediv__(self, other):
-        return self._p() / other
-
-
-WHISPER_CLI = _BackendPath("whisper", whisper_cli_path)
-LLAMA_SERVER = _BackendPath("llama", llama_server_path)
+# NVIDIA only (CLAUDE.md section 0.4), so one build per engine. whisper.cpp and
+# llama.cpp ship different ggml DLLs and cannot share a folder; Windows looks in
+# the executable's own folder first, and the CUDA runtime they share sits in bin\.
+LLAMA_SERVER = BIN / "llama-cuda" / "llama-server.exe"
+WHISPER_SERVER = BIN / "whisper-cuda" / "whisper-server.exe"
 
 CONFIG_PATH = ROOT / "config.json"
 
 
-def meeting_dir(meeting_name: str) -> Path:
-    """Everything one meeting produced, in one folder.
-
-    A run makes up to five artefacts plus a folder of voice clips. Flat in
-    `output\\` that interleaves with every other meeting and there is nothing
-    sensible to hand to somebody. The filenames keep the meeting prefix so a
-    document still identifies itself once copied out of the folder.
-    """
-    return OUTPUT / Path(meeting_name).name
+def meeting_dir(folder: str) -> Path:
+    """One meeting's folder under output\\. `folder` is never trusted as a path."""
+    return OUTPUT / Path(folder).name
 
 
 def write_atomic(path: Path, text: str) -> None:
     """Write a file so the previous version survives a failure mid-write.
 
-    Documents are overwritten in place when they are regenerated. A cancel is
-    already safe -- nothing is written until the model has finished -- but a
-    crash, a full disk or a power cut during the write itself would leave a
-    truncated file where a good one used to be. Write beside it and rename:
-    os.replace is atomic on Windows within a volume, so a reader sees either
-    the old file or the new one and never half of either.
+    Write beside it and rename: os.replace is atomic on Windows within a
+    volume, so a reader sees either the old file or the new one and never half
+    of either. meeting.json and the transcript are rewritten while a meeting
+    runs, and a power cut must not leave them truncated.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".partial")
@@ -147,159 +56,87 @@ def write_atomic(path: Path, text: str) -> None:
         raise
 
 
-def migrate_flat_output() -> int:
-    """Move pre-folder outputs into per-meeting folders. Returns how many moved.
-
-    Run once at startup. Without it, everything produced before this change
-    would simply vanish from the history list, which reads as data loss.
-    """
-    import shutil
-
-    if not OUTPUT.exists():
-        return 0
-    suffixes = ("_transcript_tagged.md", "_transcript.md", "_summary.md", "_minutes.md")
-    names = set()
-    for path in OUTPUT.glob("*.md"):
-        if not path.is_file():
-            continue
-        for suffix in suffixes:
-            if path.name.endswith(suffix):
-                # A document with no transcript beside it still belongs in a
-                # folder of its own; it is nobody's job to tidy the loose ones.
-                names.add(path.name[: -len(suffix)])
-                break
-
-    moved = 0
-    for name in sorted(names):
-        if not name:
-            continue
-        dest_dir = meeting_dir(name)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        for suffix in suffixes:
-            src = OUTPUT / (name + suffix)
-            if src.is_file() and not (dest_dir / src.name).exists():
-                shutil.move(str(src), str(dest_dir / src.name))
-                moved += 1
-        samples = OUTPUT / ("%s_speaker_samples" % name)
-        target = dest_dir / "speaker_samples"
-        if samples.is_dir() and not target.exists():
-            shutil.move(str(samples), str(target))
-            moved += 1
-    return moved
-
-
 # Files that must exist before the app can do anything useful. Checked at
-# startup so the failure is a plain sentence instead of a crash mid-job.
+# startup so the failure is a plain sentence instead of a crash mid-meeting.
 REQUIRED_FILES = [
     FFMPEG,
+    LLAMA_SERVER,
+    WHISPER_SERVER,
     MODELS / "ggml-large-v3-turbo.bin",
-    MODELS / "ggml-silero-v5.1.2.bin",
-    MODELS / "segmentation-3.0.onnx",
-    MODELS / "speaker-embedding.onnx",
+    MODELS / "silero_vad.onnx",
 ]
 
 _DEFAULTS = {
-    "llm": {
-        "model": "auto",
-        "ctx_size": 32768,
-        # "auto" = detected per machine (hardware.placement): the FFN split on
-        # a dedicated GPU, the processor on unified memory. An explicit number
-        # or regex overrides; "" means omit the flag and let llama.cpp fit it.
-        "gpu_layers": "auto",
-        "cpu_ffn_regex": "auto",
-        "cache_type_k": "q8_0",
-        "cache_type_v": "q8_0",
-        # "auto" omits --threads and lets llama.cpp use the physical
-        # core count, which measured fastest on both an 8-core Zen 4
-        # and a 16-core Meteor Lake; any fixed number was worse on one
-        # of them. The LLM stage runs alone, so it may have every core.
-        "threads": "auto",
-        "port": 8080,
-        "startup_timeout_s": 180,
-        "idle_timeout_s": 300,
-        # Speculative decoding. "auto" turns on the model's own
-        # multi-token-prediction layer (blk.64.nextn.*) when the weights fit
-        # without an FFN offload, and leaves it off when they do not -- the
-        # draft context costs ~700 MiB and is not worth buying with more
-        # offload. "" forces it off, "draft-mtp" forces it on.
-        "spec_type": "auto",
-        # Talk to a llama-server somebody else is already running instead of
-        # launching our own. Chosen from the Model dropdown ("Port"), which is
-        # what writes these two keys; nothing else here is touched by the UI.
-        "external": {"enabled": False, "port": 9931},
+    "capture": {
+        # The microphone's friendly name, written by the UI. Never the dshow
+        # GUID: that changes when the mic moves to another USB port (section 4).
+        "device": "",
+        "block_ms": 32,
+        # Development only: replay a recording at real time instead of the mic.
+        "replay_file": "",
     },
-    "chunking": {
+    "vad": {
+        "model": "models/silero_vad.onnx",
+        "threshold": 0.5,
+        "min_silence_ms": 600,
+        "pad_ms": 200,
+        "min_speech_ms": 250,
+        "max_utterance_s": 15,
+    },
+    "asr": {
+        "model": "models/ggml-large-v3-turbo.bin",
+        "language": "en",
+        "threads": 4,
+        "port": 8081,
+        "carry_context": True,
+        "max_queue": 4,
+        "drop_phrases": ["Thank you.", "Thanks for watching.", "you", "."],
+        # The second pass: each finished block re-transcribed whole, on the CPU
+        # (section 6.1).
+        "refine": True,
+        "refine_port": 8082,
+        "refine_threads": "auto",
+        "refine_vad_model": "models/ggml-silero-v5.1.2.bin",
+    },
+    "notes": {
+        "block_s": 300,
+        "min_words": 40,
+        "max_tokens": 600,
+    },
+    "summary": {
+        "model": "iq4_xs",
+        "ctx_size": 32768,
         "target_tokens": 10000,
         "overlap_tokens": 400,
         "max_map_output_tokens": 1500,
         "group_reduce_threshold": 8,
         "group_size": 5,
         "max_group_output_tokens": 2500,
+        "final_thinking": True,
+        "final_effort": "medium",
+        "final_budget_tokens": 4000,
     },
-    "thinking": {
-        "map": False,
-        "group_reduce": False,
-        "reduce": True,
-        "reduce_effort": "medium",
-        # Ceiling on thinking tokens for the final reduce, so reasoning cannot
-        # eat the whole of max_tokens and leave no document behind. 0 means
-        # unrestricted, which is llama.cpp's own default.
-        "reduce_budget_tokens": 4000,
-    },
-    "pipeline": {"concurrent_diarization": True},
-    # "auto" detects; "cuda" / "vulkan" / "cpu" pin it.
-    "gpu": {"backend": "auto"},
-    "whisper": {
-        "model": "models/ggml-large-v3-turbo.bin",
-        "vad_model": "models/ggml-silero-v5.1.2.bin",
-        "language": "en",
-        "threads": 5,
-        "max_context": 0,
-        "dtw": True,
-        # Forced alignment of the words to the audio, replacing whisper's DTW
-        # timings (BUILD_NOTES 9aj). Needs models/wav2vec2-align.onnx; without
-        # it the stage logs and skips. English only.
-        "align": True,
-        # 0 follows whisper.threads. Alignment runs on the CPU after whisper
-        # has released the GPU, so it may use more.
-        "align_threads": 0,
-    },
-    "estimate": {
-        "transcript_tokens_per_audio_minute": 206,
-        "fixed_overhead_s": 60,
-        "buffer_fraction": 0,
-    },
-    "diarization": {
-        "enabled": True,
-        "threads": 5,
-        "num_speakers": 0,
-        "cluster_threshold": 0.70,
-        "min_duration_on": 0.3,
-        "min_duration_off": 0.5,
-        "max_speakers": 20,
-        "min_cluster_speech_s": 30,
-        "min_cluster_speech_fraction": 0.005,
-        "reassign_max_distance": 0.85,
-        "merge_centroid_distance": 0.35,
-        "min_embed_duration": 1.0,
-        "min_coverage_fraction": 0.80,
-        "embedding_cache": True,
-        # Empty uses the shipped TitaNet-large. See diarize.run for the
-        # thresholds that do not carry across models.
-        "embedding_model": "",
+    "llm": {
+        "model": "auto",
+        "ctx_size": 8192,
+        "gpu_layers": "auto",
+        "cpu_ffn_regex": "auto",
+        "cache_type_k": "q8_0",
+        "cache_type_v": "q8_0",
+        # "auto" omits --threads and lets llama.cpp use the physical core count.
+        "threads": "auto",
+        "port": 8080,
+        "startup_timeout_s": 180,
+        "idle_timeout_s": 300,
+        # "auto" turns on the model's own multi-token prediction when it fits
+        # beside whisper; "" forces it off, "draft-mtp" forces it on.
+        "spec_type": "auto",
+        # A llama-server somebody else is already running. Written by the Model
+        # dropdown ("Port"); nothing else in this section is touched by the UI.
+        "external": {"enabled": False, "port": 9931},
     },
     "server": {"port": 8000},
-    # What the Output dropdown was last set to. Written by the UI on change
-    # (section 13.2), so a user who always wants minutes is not re-picking it
-    # every time. Unlike the model choice there is nothing to detect here --
-    # which document somebody wants is a fact about them, not about the
-    # machine -- so the last choice is simply the best guess available.
-    "ui": {"mode": "both"},
 }
-
-# The Output dropdown's vocabulary, which is also the wire value: "both" is
-# the two documents from one set of notes, not a third kind of document.
-MODES = ("summary", "minutes", "both")
 
 
 def _merge(base: dict, over: dict) -> dict:
@@ -315,8 +152,9 @@ def _merge(base: dict, over: dict) -> dict:
 def load_config() -> dict:
     """Read config.json, falling back to defaults for anything absent.
 
-    A malformed config.json must not take the app down silently, but it also
-    must not be papered over -- the operator edits this file by hand.
+    New keys are merged in from _DEFAULTS, so a config.json written by an older
+    version loses nothing. A malformed file must not be papered over -- the
+    operator edits it by hand -- so it raises with a plain message instead.
     """
     cfg = _DEFAULTS
     if CONFIG_PATH.exists():
@@ -333,13 +171,9 @@ def load_config() -> dict:
 def _edit_config(mutate) -> None:
     """Apply `mutate` to config.json's raw contents and write it back.
 
-    The file is read *raw* rather than through load_config(), so an operator's
-    hand-edited config keeps exactly the keys they put in it: writing the
-    merged result back would bake every current default into the file and
-    quietly freeze it against any later change to _DEFAULTS.
-
-    Shared by the two things the UI is allowed to remember, so there is one
-    place that knows how to touch the operator's file without trampling it.
+    Raw rather than through load_config(), so an operator's hand-edited config
+    keeps exactly the keys they put in it: writing the merged result back would
+    bake every current default into the file and freeze it against later ones.
     """
     raw: dict = {}
     if CONFIG_PATH.exists():
@@ -347,26 +181,20 @@ def _edit_config(mutate) -> None:
             with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
                 raw = json.load(fh)
         except (json.JSONDecodeError, OSError):
-            # A config we cannot parse is the operator's to fix; do not
-            # overwrite it with our own idea of what it should contain.
             raise RuntimeError("config.json could not be read, so the choice "
                                "was not saved.")
     if not isinstance(raw, dict):
         raise RuntimeError("config.json is not an object, so the choice was "
                            "not saved.")
     mutate(raw)
-    write_atomic(CONFIG_PATH, json.dumps(raw, indent=2) + '\n')
+    write_atomic(CONFIG_PATH, json.dumps(raw, indent=2) + "\n")
 
 
 def save_llm_choice(external: bool, port: int | None = None) -> None:
-    """Remember the Model dropdown's choice across restarts (section 13.3).
+    """Remember the Model dropdown's Port choice across restarts.
 
-    Only `llm.external` is written, and only the two keys the dropdown owns.
-
-    Picking High or Low clears the flag rather than pinning the quantisation --
-    the detection in hardware.choose_key is right far more often than a choice
-    made once on a machine that may since have had its card changed. The port
-    number survives either way, so switching back does not ask for it again.
+    High or Low clears the flag rather than pinning a quantisation: detection
+    knows the machine better than a choice made once. The port survives either way.
     """
     def mutate(raw: dict) -> None:
         ext = raw.setdefault("llm", {}).setdefault("external", {})
@@ -377,34 +205,13 @@ def save_llm_choice(external: bool, port: int | None = None) -> None:
     _edit_config(mutate)
 
 
-def save_mode_choice(mode: str) -> None:
-    """Remember the Output dropdown across restarts.
-
-    Only `ui.mode` is written. An unrecognised value is refused rather than
-    stored: this file is read back on every launch, and a junk mode would
-    silently fall through to the default for ever without anyone working out
-    why their choice keeps resetting.
-    """
-    if mode not in MODES:
-        raise RuntimeError("%r is not one of %s." % (mode, ", ".join(MODES)))
-
+def save_device(name: str) -> None:
+    """Remember the microphone by its friendly name (section 4)."""
     def mutate(raw: dict) -> None:
-        raw.setdefault("ui", {})["mode"] = mode
+        raw.setdefault("capture", {})["device"] = str(name)
 
     _edit_config(mutate)
 
-
-def ui_mode(cfg: dict | None = None) -> str:
-    """The Output dropdown's remembered value, or the default.
-
-    Anything unrecognised -- a hand-edit, or a value written by a version that
-    offered a mode this one does not -- falls back rather than reaching the UI
-    as a dropdown with no option selected.
-    """
-    if cfg is None:
-        cfg = load_config()
-    mode = str((cfg.get("ui") or {}).get("mode") or "")
-    return mode if mode in MODES else "both"
 
 def external_llm(cfg: dict | None = None) -> tuple[bool, int]:
     """(is an external server configured, which port)."""
@@ -424,69 +231,40 @@ def resolve(rel: str) -> Path:
     return p if p.is_absolute() else (ROOT / p)
 
 
-def child_env() -> dict:
+def child_env(gpu: bool = True) -> dict:
     """Environment for spawned binaries.
 
-    bin\\ must be on PATH so ggml-cuda.dll can find cublas64_12.dll and
-    cudart64_12.dll, which are shared between the whisper and llama builds.
-    Without this both engines silently fall back to CPU -- measured at roughly
-    10x slower for whisper (BUILD_NOTES.md).
+    bin\\ must be on PATH so ggml-cuda.dll can find cudart64_12.dll and the
+    cuBLAS DLLs, which both engines share. Without it llama-server reports
+    `invalid device` -- the CUDA backend never loaded (BUILD_NOTES section 1).
+
+    CUDA_VISIBLE_DEVICES pins every child to the one card hardware.detect_gpu
+    chose (section 8). By UUID, so the child sees exactly that card as device 0
+    and the CUDA-versus-nvidia-smi numbering difference never comes into it.
+    `gpu=False` hides every card, for the CPU refine server.
     """
     env = dict(os.environ)
     env["PATH"] = str(BIN) + os.pathsep + env.get("PATH", "")
-
-    # AMD on Vulkan crashes hard in ggml's KHR_coopmat path -- see
-    # hardware.needs_coopmat_workaround for the measurement. ggml tests this
-    # variable for existence, not value, so "1" and "0" both disable it.
-    #
-    # Guarded on `probed()`: detection spawns children of its own, and those
-    # children ask for this environment. Consulting detection here before it
-    # has run would recurse forever. Enumeration itself is safe with matrix
-    # cores enabled -- it is only inference that dies.
     from . import hardware
 
-    if hardware.probed() and hardware.needs_coopmat_workaround():
-        env["GGML_VK_DISABLE_COOPMAT"] = "1"
+    if not gpu:
+        env["CUDA_VISIBLE_DEVICES"] = ""
+    elif hardware.probed():
+        uuid = hardware.detect_gpu().get("uuid") or ""
+        if uuid:
+            env["CUDA_VISIBLE_DEVICES"] = uuid
     return env
 
 
 def missing_files() -> list[Path]:
-    """Everything that must be present before a job can succeed.
-
-    The LLM weights are resolved from config.json rather than hard-coded, and
-    are checked here rather than at the LLM stage: without this, a missing
-    16.5GB download only surfaces an hour into a job, after transcription and
-    diarization have already run.
-    """
+    """Everything that must be present before a meeting can be transcribed."""
     missing = [p for p in REQUIRED_FILES if not p.exists()]
-    # The engines are resolved per backend, so check the pair this machine
-    # will actually launch rather than a hard-coded folder.
-    missing += [p for p in (whisper_cli_path(backend("whisper")),
-                            llama_server_path(backend("llama")))
-                if not p.exists()]
     try:
         from . import hardware
 
         cfg = load_config()
-        if external_llm(cfg)[0]:
-            # Nothing local to check: the weights belong to whoever is running
-            # the server on that port. This is the one configuration in which
-            # the app is useful without a 16 GB download.
-            return missing
-        requested = cfg["llm"]["model"]
-        if requested in ("auto", "", None):
-            # At least one, not all of them. The update payload carries no
-            # `models\`, so a copy updating from 1.0.x has Q4_K_M and no
-            # UD-IQ4_XS; demanding the file the updater cannot deliver would
-            # stop it starting. Any language model on disk is enough to run,
-            # and the dropdown marks the rest "(not downloaded)".
-            if not hardware.any_model_present():
-                wanted = [hardware.model_path(m["key"]) for m in hardware.MODELS]
-            else:
-                wanted = []
-        else:
-            wanted = [resolve(requested)]
-        missing += [p for p in wanted if not p.exists()]
+        if not external_llm(cfg)[0] and not hardware.any_model_present():
+            missing.append(hardware.model_path(hardware.MODELS[-1]["key"]))
     except Exception:  # noqa: BLE001 - a broken config is reported elsewhere
         pass
     return missing

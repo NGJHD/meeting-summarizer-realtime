@@ -1,936 +1,823 @@
-/* Meeting Summariser front end. No framework, no bundler, no external requests. */
+/* Meeting Transcriber Live front end. No framework, no bundler, no external requests. */
 (function () {
   "use strict";
 
   var $ = function (id) { return document.getElementById(id); };
 
-  // `phase` says what the progress bar is currently running, which decides
-  // where Cancel goes back to: a cancelled run has nothing to show, a
-  // cancelled rewrite still has the finished meeting behind it.
-  var state = { jobId: null, file: null, events: null, timer: null, started: 0,
-                docs: {}, phase: "run" };
-  var components = { timer: null };
+  var S = {
+    status: { state: "idle" },
+    view: null,          // the meeting on screen: live, or one from the history
+    liveId: "",
+    elapsedBase: 0,      // Date.now() at the live meeting's session time 0
+    timer: null,
+    es: null,
+    summary: null,       // the running summary job, if any
+    replay: false,
+    device: "",
+    deviceListAt: 0,
+    deviceMessage: "",
+    lastModel: ""
+  };
+
+  /* ---------------------------------------------------------------- helpers */
+
+  function hms(sec) {
+    sec = Math.max(0, Math.floor(sec || 0));
+    var h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+    return (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
+  }
+
+  // Real clock time, 12-hour: "2:34:05 PM", or "2:34 PM" without seconds.
+  function clock12(epochSec, withSeconds) {
+    var d = new Date((epochSec || 0) * 1000);
+    var h = d.getHours(), m = d.getMinutes(), s = d.getSeconds();
+    var half = h < 12 ? "AM" : "PM";
+    h = h % 12 || 12;
+    return h + ":" + (m < 10 ? "0" : "") + m +
+      (withSeconds ? ":" + (s < 10 ? "0" : "") + s : "") + " " + half;
+  }
+
+  function humanDuration(sec) {
+    var m = Math.floor((sec || 0) / 60);
+    if (m < 1) return "under a minute";
+    if (m < 60) return m + "m";
+    return Math.floor(m / 60) + "h " + (m % 60 < 10 ? "0" : "") + (m % 60) + "m";
+  }
+
+  function humanDate(epoch) {
+    var d = new Date(epoch * 1000);
+    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    return d.getDate() + " " + months[d.getMonth()] + " " + d.getFullYear();
+  }
+
+  function api(method, url, body) {
+    var opts = { method: method, headers: {} };
+    if (body !== undefined) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(url, opts).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (b) {
+        if (!r.ok) throw new Error(b.error || "Something went wrong.");
+        return b;
+      });
+    });
+  }
+
+  function banner(text, kind) {
+    var el = $("banner");
+    el.textContent = text || "";
+    el.className = "banner" + (kind === "error" ? " error" : "");
+    el.hidden = !text;
+  }
+
+  function words(lines) {
+    var n = 0;
+    (lines || []).forEach(function (l) { n += (l.text || "").split(/\s+/).filter(Boolean).length; });
+    return n;
+  }
+
+  // "At the bottom" generously: anywhere within about four lines of the end
+  // keeps following the meeting.
+  function atBottom(el) { return el.scrollHeight - el.scrollTop - el.clientHeight < 140; }
+  function toBottom(el) { el.scrollTop = el.scrollHeight; }
 
   /* ---------------------------------------------------------------- boot */
 
-  // run.bat now waits for the server before opening the browser, but the page
-  // can still be reloaded early or the server can be slow, so this keeps
-  // retrying. It reports elapsed time and escalates the wording rather than
-  // sitting on a bare spinner: an unexplained "Starting up..." is
-  // indistinguishable from a hang, and users reasonably conclude the worse one.
   var bootStarted = Date.now();
 
-  function bootStage(seconds) {
-    if (seconds < 10) {
-      return ["Contacting the application…", null];
-    }
-    if (seconds < 30) {
-      return ["Still starting. The first launch takes a little longer.", null];
-    }
-    if (seconds < 90) {
-      return ["Still starting.",
-              "This is longer than usual. Check the black console window " +
-              "titled “Meeting Summariser” — if it has closed or shows an " +
-              "error, close this tab and run run.bat again."];
-    }
-    return ["The application isn’t responding.",
-            "Close this tab, close the black console window, and run run.bat " +
-            "again. If it keeps happening, restart the computer — a previous " +
-            "run may still be holding the graphics card."];
-  }
-
-  function waitForServer(attempt) {
-    var seconds = Math.floor((Date.now() - bootStarted) / 1000);
-    $("boot-elapsed").textContent = seconds + "s";
-    // Ramps toward 90% over ~20s so it moves without ever claiming to be done.
-    $("boot-bar").style.width = Math.min(90, 8 + seconds * 4) + "%";
-    var stage = bootStage(seconds);
-    $("boot-msg").textContent = stage[0];
-    if (stage[1]) { $("boot-detail").textContent = stage[1]; $("boot-detail").hidden = false; }
-    if (seconds >= 90) { $("boot-spinner").hidden = true; $("boot-title").textContent = "Not responding"; }
-
-    fetch("/api/health")
+  function waitForServer() {
+    fetch("/api/health", { cache: "no-store" })
       .then(function (r) { return r.json(); })
       .then(function (h) {
         if (!h.ok) {
-          show("connecting", false);
-          show("failed", true);
-          $("fail-msg").textContent =
-            "These files are missing from the application folder:\n\n  " +
-            h.missing.join("\n  ") +
-            "\n\nThe folder may not have copied completely, or the models " +
-            "have not been downloaded yet. Run DOWNLOAD_MODELS.bat, or copy " +
-            "the folder again.";
+          $("boot-msg").textContent = "Some files are missing from the application folder. " +
+            "If this is a fresh copy, run DOWNLOAD_MODELS.bat first.";
+          var ul = $("boot-missing");
+          ul.innerHTML = "";
+          (h.missing || []).forEach(function (m) {
+            var li = document.createElement("li"); li.textContent = m; ul.appendChild(li);
+          });
+          ul.hidden = false;
+          document.querySelector("#boot .spinner").hidden = true;
           return;
         }
-        $("boot-bar").style.width = "100%";
-        show("connecting", false);
-        initComponents();
-        loadModels();
-        reattach();
+        $("boot").hidden = true;
+        init();
       })
       .catch(function () {
-        setTimeout(function () { waitForServer(attempt + 1); }, 400);
+        var s = (Date.now() - bootStarted) / 1000;
+        $("boot-msg").textContent = s < 15 ? "Contacting the application…"
+          : "Still starting. If this goes on, check the black console window is open.";
+        setTimeout(waitForServer, 500);
       });
   }
 
-  function show(id, on) { $(id).hidden = !on; }
-
-  /* ------------------------------------------------------------- reattach */
-
-  // Closing the tab must not orphan a two-hour run, and reopening it must not
-  // present a fresh upload form while the graphics card is busy -- that reads
-  // as "my job is gone" and there would be no way back to Cancel.
-  function reattach() {
-    fetch("/api/current")
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (!d.job) { show("setup", true); loadHistory(); return; }
-        state.jobId = d.job.id;
-        // A rewrite that is cancelled after a reload must still go back to the
-        // meeting it was rewriting, not to an empty upload form.
-        state.phase = d.job.kind === "generate" ? "generate" : "run";
-        state.meeting = d.job.meeting || null;
-        show("progress", true);
-        $("log").textContent = "";
-        // The server reports elapsed with every status event, so the local
-        // clock is corrected from that rather than counting from this reload.
-        state.started = Date.now();
-        startClock();
-        $("stage-label").textContent = d.job.stage_label || "Working";
-        $("pct").textContent = Math.round(d.job.percent) + "%";
-        $("bar-fill").style.width = d.job.percent + "%";
-        listen();
-      })
-      .catch(function () { show("setup", true); });
+  function init() {
+    loadDevices(true);
+    loadModels();
+    loadSession();
+    loadHistory();
+    listen();
   }
 
-  /* -------------------------------------------------------------- history */
+  /* ---------------------------------------------------------------- events */
+
+  function listen() {
+    if (S.es) S.es.close();
+    var es = new EventSource("/api/events");
+    S.es = es;
+    var opened = false;
+    es.onopen = function () {
+      if (opened) return;
+      opened = true;
+      // Reconnected after a server restart or a sleep: resync everything.
+      loadSession();
+      loadHistory();
+      api("POST", "/api/monitor").catch(function () {});
+    };
+    es.onmessage = function (e) {
+      var ev;
+      try { ev = JSON.parse(e.data); } catch (x) { return; }
+      handle(ev);
+    };
+    es.onerror = function () {
+      es.close();
+      S.es = null;
+      setTimeout(listen, 1500);
+    };
+  }
+
+  function handle(ev) {
+    switch (ev.type) {
+      case "status": applyStatus(ev); break;
+      case "level": meter(ev.db); break;
+      case "session":
+        // A meeting that has just started always takes the screen: pressing
+        // Start means "show me this one", whatever was open before.
+        if (!S.view || S.view.live || S.view.id === ev.session.id ||
+            ev.session.state === "live") showSession(ev.session);
+        break;
+      case "utterance": onUtterance(ev.line); break;
+      case "block_lines": onBlockLines(ev); break;
+      case "block_pending":
+      case "block": onBlock(ev.block); break;
+      case "history": loadHistory(); break;
+      case "summary_progress": onSummaryProgress(ev); break;
+      case "summary_done": onSummaryDone(ev); break;
+      case "error": banner(ev.message, "error"); break;
+    }
+  }
+
+  function loadSession() {
+    api("GET", "/api/session").then(function (d) {
+      applyStatus(d.status);
+      if (d.summary && d.summary.state === "running") onSummaryProgress(d.summary);
+      if (d.session && (!S.view || S.view.live || S.view.id === d.session.id)) {
+        showSession(d.session);
+      }
+    }).catch(function () {});
+  }
+
+  /* ---------------------------------------------------------------- status */
+
+  function applyStatus(st) {
+    var prev = S.status.state;
+    S.status = st;
+    S.liveId = st.live_id || "";
+    var state = st.state;
+    var btn = $("startstop");
+    btn.classList.toggle("stop", state === "live");
+    btn.textContent = state === "live" ? "Stop" : state === "loading" ? "Loading…"
+      : state === "stopping" ? "Stopping…" : "Start";
+    btn.disabled = !(state === "live" || (state === "idle" && (S.device || S.replay)));
+    $("mic").disabled = state !== "idle" || S.replay;
+    $("model").disabled = state !== "idle";
+    $("port").disabled = state !== "idle";
+
+    var dot = $("status-dot");
+    dot.className = "dot" + (state === "live" ? " live" : state === "idle" ? "" : " busy");
+    var text = state === "live" ? "Listening" : state === "loading" ? (st.message || "Loading models…")
+      : state === "stopping" ? (st.message || "Finishing up…")
+      : state === "summarizing" ? "Writing the full summary" : "Stopped";
+    $("status-text").textContent = text;
+
+    $("controls").hidden = state === "summarizing";
+    $("summary-panel").hidden = state !== "summarizing";
+
+    if (state === "idle" && st.message) banner(st.message, "error");
+    else if (state === "live" && st.warning) banner(st.warning);
+    else if (state === "live" && prev !== "live") banner(S.deviceMessage || "");
+    else if (state === "loading") banner("");
+
+    if (state === "live") startClock(); else stopClock();
+    $("livebar").hidden = !(S.liveId && S.view && S.view.id !== S.liveId);
+    updateFooter();
+    updateNextNotes();
+    if (prev !== state && state === "idle") api("POST", "/api/monitor").catch(function () {});
+  }
+
+  function startClock() {
+    if (S.timer) return;
+    S.timer = setInterval(tick, 1000);
+    tick();
+  }
+  function stopClock() {
+    if (S.timer) { clearInterval(S.timer); S.timer = null; }
+    $("elapsed").textContent = "";
+  }
+  function tick() {
+    if (!S.elapsedBase) return;
+    $("elapsed").textContent = hms((Date.now() - S.elapsedBase) / 1000);
+  }
+
+  function meter(db) {
+    var pct = Math.max(0, Math.min(100, (db + 60) / 50 * 100));
+    var el = $("meter-fill");
+    el.style.width = pct + "%";
+    el.style.opacity = String(0.35 + pct / 160);
+  }
+
+  $("startstop").addEventListener("click", function () {
+    var state = S.status.state;
+    $("startstop").disabled = true;
+    if (state === "live") {
+      api("POST", "/api/stop").catch(function (e) { banner(e.message, "error"); });
+    } else if (state === "idle") {
+      banner("");
+      api("POST", "/api/start").catch(function (e) { banner(e.message, "error"); });
+    }
+  });
+
+  /* ---------------------------------------------------------------- mic */
+
+  function loadDevices(force) {
+    if (!force && Date.now() - S.deviceListAt < 3000) return;
+    S.deviceListAt = Date.now();
+    api("GET", "/api/devices").then(function (d) {
+      var sel = $("mic");
+      S.replay = !!d.replay;
+      sel.innerHTML = "";
+      if (d.replay) {
+        sel.appendChild(new Option("Replay file (development)", ""));
+      } else if (!d.devices.length) {
+        sel.appendChild(new Option("No microphone found", ""));
+      }
+      if (!d.replay) {
+        d.devices.forEach(function (name) {
+          var o = new Option(name, name);
+          if (name === d.selected) o.selected = true;
+          sel.appendChild(o);
+        });
+      }
+      S.device = d.selected || "";
+      S.deviceMessage = d.message || "";
+      if (d.message && S.status.state === "idle") banner(d.message, d.how === "none" ? "error" : "");
+      applyStatus(S.status);
+    }).catch(function () {});
+  }
+
+  // Re-enumerate whenever the dropdown is opened: the mic may have been
+  // plugged in, or moved to another USB port, since the page loaded.
+  $("mic").addEventListener("mousedown", function () { loadDevices(false); });
+  $("mic").addEventListener("focus", function () { loadDevices(false); });
+  $("mic").addEventListener("change", function () {
+    var name = $("mic").value;
+    if (!name) return;
+    S.device = name;
+    S.deviceMessage = "";
+    banner("");
+    api("POST", "/api/devices/choice", { name: name }).catch(function (e) { banner(e.message, "error"); });
+    applyStatus(S.status);
+  });
+
+  /* ---------------------------------------------------------------- model */
+
+  function loadModels() {
+    api("GET", "/api/models").then(function (d) {
+      var sel = $("model");
+      sel.innerHTML = "";
+      d.models.forEach(function (m) {
+        var label = m.label + (m.available ? "" : " (not downloaded)") +
+          (m.available && !m.fits ? " (slower here)" : "");
+        var o = new Option(label, m.key);
+        o.disabled = !m.available;
+        sel.appendChild(o);
+      });
+      sel.appendChild(new Option("Port", "external"));
+      sel.value = d.selected;
+      $("port").value = d.external.port;
+      S.lastModel = d.selected;
+      syncPort();
+    }).catch(function () {});
+  }
+
+  function syncPort() { $("port").hidden = $("model").value !== "external"; }
+
+  function saveModel() {
+    var key = $("model").value;
+    var body = { key: key };
+    if (key === "external") body.port = parseInt($("port").value, 10);
+    api("POST", "/api/models/choice", body).catch(function (e) { banner(e.message, "error"); });
+  }
+
+  $("model").addEventListener("change", function () { syncPort(); saveModel(); });
+  $("port").addEventListener("change", saveModel);
+
+  /* ---------------------------------------------------------------- the view */
+
+  function showSession(snap) {
+    var live = snap.state === "live" || snap.state === "stopping";
+    if (live) S.elapsedBase = Date.now() - snap.elapsed * 1000;
+    showMeeting({
+      id: snap.id, name: snap.name, live: live, lines: snap.lines, blocks: snap.blocks,
+      summary: snap.summary || "", has_summary: !!snap.has_summary,
+      next_notes_at: snap.next_notes_at, block_s: snap.block_s || 300, started: snap.started
+    });
+  }
+
+  function showMeeting(m) {
+    S.view = m;
+    $("view-name").textContent = m.live ? "" : m.name;
+    renderTranscript();
+    renderNotes();
+    setTabs(m.has_summary);
+    $("summary-view").innerHTML = m.has_summary ? renderMarkdown(m.summary) : "";
+    selectTab("transcript");
+    $("livebar").hidden = !(S.liveId && m.id !== S.liveId);
+    markActiveRow();
+    updateFooter();
+    updateNextNotes();
+  }
+
+  function openMeeting(id) {
+    if (S.liveId && id === S.liveId) {
+      api("GET", "/api/session").then(function (d) { if (d.session) showSession(d.session); });
+      return;
+    }
+    api("GET", "/api/history/" + encodeURIComponent(id)).then(function (d) {
+      if (d.live) { showSession(d); return; }
+      showMeeting({ id: d.id, name: d.name, live: false, lines: d.lines, blocks: d.blocks,
+                    summary: d.summary, has_summary: d.has_summary, started: d.started });
+    }).catch(function (e) { banner(e.message, "error"); loadHistory(); });
+  }
+
+  $("livebar").addEventListener("click", function () { openMeeting(S.liveId); });
+
+  /* ---------------------------------------------------------------- transcript */
+
+  function lineEl(l) {
+    var p = document.createElement("p");
+    p.className = "line" + (l.refined ? "" : " rough");
+    p.dataset.id = l.id;
+    p.dataset.block = l.block;
+    var ts = document.createElement("span");
+    ts.className = "ts";
+    ts.textContent = clock12(S.view.started + l.t, true);
+    p.appendChild(ts);
+    p.appendChild(document.createTextNode(l.text));
+    return p;
+  }
+
+  function renderTranscript() {
+    var box = $("transcript");
+    var lines = S.view.lines || [];
+    box.innerHTML = "";
+    if (!lines.length) {
+      var ph = document.createElement("p");
+      ph.className = "placeholder";
+      ph.id = "transcript-empty";
+      ph.textContent = S.view.live ? "Listening. What is said will appear here."
+        : "Nothing was transcribed in this meeting.";
+      box.appendChild(ph);
+    }
+    var frag = document.createDocumentFragment();
+    lines.forEach(function (l) { frag.appendChild(lineEl(l)); });
+    box.appendChild(frag);
+    if (S.view.live) toBottom(box); else box.scrollTop = 0;
+    $("jump-transcript").hidden = true;
+  }
+
+  function onUtterance(l) {
+    if (!S.view || S.view.id !== S.liveId) {
+      if (S.view && S.view.live) S.view.lines.push(l);
+      return;
+    }
+    S.view.lines.push(l);
+    var box = $("transcript");
+    var stick = atBottom(box);
+    var empty = $("transcript-empty");
+    if (empty) empty.remove();
+    box.appendChild(lineEl(l));
+    if (stick) toBottom(box); else $("jump-transcript").hidden = false;
+    updateFooter();
+  }
+
+  // Refined lines replace a block's live ones. The swap must not move what
+  // the reader is looking at: anchor on the first visible line outside the
+  // replaced block (section 6.1).
+  function onBlockLines(ev) {
+    if (!S.view || S.view.id !== S.liveId) return;
+    var k = ev.block;
+    var kept = S.view.lines.filter(function (l) { return l.block !== k; });
+    var before = kept.filter(function (l) { return l.block < k; });
+    var after = kept.filter(function (l) { return l.block > k; });
+    S.view.lines = before.concat(ev.lines, after);
+
+    var box = $("transcript");
+    var stick = atBottom(box);
+    var anchor = null, anchorOffset = 0;
+    var top = box.scrollTop;
+    var els = box.querySelectorAll(".line");
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.offsetTop + el.offsetHeight <= top) continue;
+      if (parseInt(el.dataset.block, 10) === k) continue;
+      anchor = el;
+      anchorOffset = el.offsetTop - top;
+      break;
+    }
+    var old = box.querySelectorAll('.line[data-block="' + k + '"]');
+    var next = null;
+    for (var j = 0; j < els.length; j++) {
+      if (parseInt(els[j].dataset.block, 10) > k) { next = els[j]; break; }
+    }
+    Array.prototype.forEach.call(old, function (el) { el.remove(); });
+    var frag = document.createDocumentFragment();
+    ev.lines.forEach(function (l) { frag.appendChild(lineEl(l)); });
+    if (next) box.insertBefore(frag, next); else box.appendChild(frag);
+    if (stick) toBottom(box);
+    else if (anchor) box.scrollTop = anchor.offsetTop - anchorOffset;
+  }
+
+  $("transcript").addEventListener("scroll", function () {
+    if (atBottom($("transcript"))) $("jump-transcript").hidden = true;
+  });
+  $("jump-transcript").addEventListener("click", function () {
+    toBottom($("transcript"));
+    $("jump-transcript").hidden = true;
+  });
+
+  /* ---------------------------------------------------------------- notes */
+
+  // "2:30 – 2:35 PM": real clock time, not time since Start (operator's choice).
+  function clockRange(a, b) {
+    var x = clock12(a, false), y = clock12(b, false);
+    return x.slice(-2) === y.slice(-2) ? x.slice(0, -3) + " – " + y : x + " – " + y;
+  }
+
+  function blockText(b) {
+    if (b.status === "pending" || b.status === "refining") return "Tidying up the transcript…";
+    if (b.status === "writing") return "Writing notes…";
+    return "";
+  }
+
+  function blockEl(b) {
+    var card = document.createElement("div");
+    var waiting = !!blockText(b);
+    card.className = "block" + (waiting ? " pending" : "");
+    card.dataset.index = b.index;
+    var head = document.createElement("div");
+    head.className = "block-head";
+    var span = document.createElement("span");
+    span.textContent = clockRange(S.view.started + b.start_s, S.view.started + b.end_s);
+    head.appendChild(span);
+    card.appendChild(head);
+    var body = document.createElement("div");
+    body.className = "block-body";
+    if (waiting) body.textContent = blockText(b);
+    else body.innerHTML = renderMarkdown(b.notes || "");
+    card.appendChild(body);
+    return card;
+  }
+
+  function renderNotes() {
+    var box = $("notes");
+    var blocks = (S.view.blocks || []).filter(function (b) { return b.status !== "skipped"; });
+    box.innerHTML = "";
+    if (!blocks.length) {
+      var ph = document.createElement("p");
+      ph.className = "placeholder";
+      ph.id = "notes-empty";
+      ph.textContent = S.view.live ? "A short note appears here after every 5 minutes."
+        : "No notes were written for this meeting.";
+      box.appendChild(ph);
+    }
+    blocks.sort(function (a, b) { return a.start_s - b.start_s; });
+    blocks.forEach(function (b) { box.appendChild(blockEl(b)); });
+    if (S.view.live) toBottom(box); else box.scrollTop = 0;
+    $("jump-notes").hidden = true;
+  }
+
+  // Appended at the bottom, never removed (section 7).
+  function onBlock(b) {
+    if (!S.view || S.view.id !== S.liveId) return;
+    var list = S.view.blocks || (S.view.blocks = []);
+    var found = false;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].index === b.index) { list[i] = b; found = true; }
+    }
+    if (!found) list.push(b);
+    var box = $("notes");
+    var stick = atBottom(box);
+    var empty = $("notes-empty");
+    if (empty) empty.remove();
+    var existing = box.querySelector('.block[data-index="' + b.index + '"]');
+    if (b.status === "skipped") { if (existing) existing.remove(); return; }
+    var el = blockEl(b);
+    if (existing) existing.replaceWith(el);
+    else box.appendChild(el);
+    if (stick) toBottom(box); else $("jump-notes").hidden = false;
+  }
+
+  $("notes").addEventListener("scroll", function () {
+    if (atBottom($("notes"))) $("jump-notes").hidden = true;
+  });
+  $("jump-notes").addEventListener("click", function () {
+    toBottom($("notes"));
+    $("jump-notes").hidden = true;
+  });
+
+  function updateNextNotes() {
+    var v = S.view;
+    $("next-notes").textContent = (v && v.live && S.status.state === "live" && v.next_notes_at)
+      ? "Next notes at " + clock12(v.started + v.next_notes_at, false) : "";
+  }
+  setInterval(function () {
+    // The boundary moves on as the meeting runs; recompute from the clock.
+    var v = S.view;
+    if (!v || !v.live || S.status.state !== "live" || !S.elapsedBase) return;
+    var block = v.block_s || 300;
+    var t = (Date.now() - S.elapsedBase) / 1000;
+    v.next_notes_at = (Math.floor(t / block) + 1) * block;
+    updateNextNotes();
+  }, 5000);
+
+  /* ---------------------------------------------------------------- tabs */
+
+  // One tab on its own is just a title; it only becomes a switch once the
+  // meeting has a full summary to switch to.
+  function setTabs(hasSummary) {
+    $("tab-summary").hidden = !hasSummary;
+    document.querySelector(".tabs").classList.toggle("single", !hasSummary);
+    $("tab-transcript").disabled = !hasSummary;
+  }
+
+  function selectTab(which) {
+    var summary = which === "summary";
+    $("tab-transcript").classList.toggle("active", !summary);
+    $("tab-summary").classList.toggle("active", summary);
+    $("transcript").hidden = summary;
+    $("summary-view").hidden = !summary;
+    $("jump-transcript").hidden = true;
+  }
+  $("tab-transcript").addEventListener("click", function () { selectTab("transcript"); });
+  $("tab-summary").addEventListener("click", function () { selectTab("summary"); });
+
+  /* ---------------------------------------------------------------- full summary */
+
+  var LIVE_TIP = "Stops listening and writes a summary of the whole meeting — the topics " +
+    "discussed and what was concluded on each. It's kept with this meeting in the history, " +
+    "and you can save a copy anywhere. Takes several minutes for a long meeting. Listening " +
+    "can't be resumed afterwards.";
+  var PAST_TIP = "Writes a summary of the whole meeting — the topics discussed and what was " +
+    "concluded on each. It's kept with this meeting in the history, and you can save a copy " +
+    "anywhere. Takes several minutes for a long meeting.";
+
+  function updateFooter() {
+    var v = S.view;
+    var hasSummary = v && v.has_summary;
+    $("summary-actions").hidden = !hasSummary;
+    $("summary-make").hidden = !v || hasSummary;
+    if (!v || hasSummary) return;
+    var isLive = v.id === S.liveId;
+    $("make-tip").setAttribute("data-tip", isLive ? LIVE_TIP : PAST_TIP);
+    var state = S.status.state;
+    var running = S.summary && S.summary.state === "running";
+    var ok = words(v.lines) >= 40 && !running &&
+      (isLive ? state === "live" : state === "idle");
+    $("make-summary").disabled = !ok;
+    $("make-summary").title = (!isLive && state !== "idle" && !running)
+      ? "Stop the live meeting first." : "";
+  }
+
+  $("make-summary").addEventListener("click", function () {
+    var v = S.view;
+    if (!v) return;
+    var isLive = v.id === S.liveId;
+    var text = isLive
+      ? "This will stop listening and generate a full summary of the meeting so far. It can " +
+        "take several minutes, and listening can't be resumed. Continue?"
+      : "This will generate a full summary of this meeting. It can take several minutes. Continue?";
+    confirmModal("Generate full summary", text, "Continue").then(function (yes) {
+      if (!yes) return;
+      banner("Choose where to save a copy of the summary…");
+      $("make-summary").disabled = true;
+      api("POST", "/api/summary/dialog", { id: v.id }).then(function (d) {
+        banner("");
+        if (!d.path) { updateFooter(); return; }   // cancelled: nothing changes
+        return api("POST", "/api/summary/start", { id: v.id, path: d.path });
+      }).catch(function (e) { banner(e.message, "error"); updateFooter(); });
+    });
+  });
+
+  function onSummaryProgress(p) {
+    S.summary = p;
+    $("summary-panel").hidden = false;
+    $("controls").hidden = true;
+    $("sp-msg").textContent = p.message || "";
+    $("sp-fill").style.width = Math.round((p.fraction || 0) * 100) + "%";
+    updateFooter();
+  }
+
+  function onSummaryDone(ev) {
+    S.summary = ev;
+    $("summary-panel").hidden = true;
+    $("controls").hidden = false;
+    if (ev.state === "done") {
+      if (S.view && S.view.id === ev.id) {
+        S.view.summary = ev.summary || "";
+        S.view.has_summary = true;
+        S.view.live = false;
+        setTabs(true);
+        $("summary-view").innerHTML = renderMarkdown(S.view.summary);
+        selectTab("summary");
+      }
+      banner(ev.copy_error || "");
+    } else if (ev.state === "failed") {
+      banner(ev.message, "error");
+    } else if (ev.state === "cancelled") {
+      banner("The summary was cancelled. The meeting is still in the history.");
+    }
+    if (S.view && S.view.id === ev.id && S.view.live) S.view.live = false;
+    updateFooter();
+    loadHistory();
+  }
+
+  $("sp-cancel").addEventListener("click", function () {
+    $("sp-msg").textContent = "Cancelling…";
+    api("POST", "/api/summary/cancel").catch(function () {});
+  });
+
+  $("open-file").addEventListener("click", function () {
+    if (S.view) api("POST", "/api/open", { id: S.view.id, what: "file" }).catch(function (e) { banner(e.message, "error"); });
+  });
+  $("open-folder").addEventListener("click", function () {
+    if (S.view) api("POST", "/api/open", { id: S.view.id, what: "folder" }).catch(function (e) { banner(e.message, "error"); });
+  });
+
+  /* ---------------------------------------------------------------- history */
 
   function loadHistory() {
-    fetch("/api/history")
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        var list = d.meetings || [];
-        var host = $("hist-list");
-        host.textContent = "";
-        if (!list.length) { show("history", false); return; }
-        list.forEach(function (m) { host.appendChild(historyRow(m)); });
-        show("history", true);
-      })
-      .catch(function () { show("history", false); });
+    api("GET", "/api/history").then(function (d) {
+      var host = $("history");
+      host.innerHTML = "";
+      if (d.live) host.appendChild(historyRow(d.live, true));
+      d.meetings.forEach(function (m) { host.appendChild(historyRow(m, false)); });
+      $("history-empty").hidden = !!(d.live || d.meetings.length);
+      markActiveRow();
+    }).catch(function () {});
   }
 
-  $("hist-refresh").addEventListener("click", loadHistory);
+  function historyRow(m, isLive) {
+    var row = document.createElement("div");
+    row.className = "hrow";
+    row.dataset.id = m.id;
+    var main = document.createElement("div");
+    main.className = "hmain";
+    var name = document.createElement("div");
+    name.className = "hname";
+    name.textContent = m.name + (m.has_summary ? " ✓" : "");
+    var meta = document.createElement("div");
+    meta.className = "hmeta";
+    if (isLive) {
+      meta.innerHTML = '<span class="hlive">● Live</span>';
+    } else {
+      meta.textContent = humanDuration(m.duration_s) +
+        (m.name.indexOf(humanDate(m.started).split(" ")[0]) === -1 ? " · " + humanDate(m.started) : "");
+    }
+    main.appendChild(name);
+    main.appendChild(meta);
+    row.appendChild(main);
 
-  function historyRow(m) {
-    var row = document.createElement("button");
-    row.className = "hist-row";
-    row.type = "button";
-
-    var name = document.createElement("span");
-    name.className = "hist-name";
-    name.textContent = m.meeting;
-    row.appendChild(name);
-
-    var meta = document.createElement("span");
-    meta.className = "hist-meta";
-    var bits = [];
-    if (m.duration_s) bits.push(humanClock(m.duration_s));
-    if (m.documents.length) bits.push(m.documents.join(" + "));
-    else bits.push("transcript only");
-    if (m.named) bits.push("named");
-    meta.textContent = bits.join(" · ");
-    row.appendChild(meta);
-
-    row.addEventListener("click", function () { openHistory(m.meeting, row); });
+    var ren = document.createElement("button");
+    ren.className = "iconbtn";
+    ren.type = "button";
+    ren.title = "Rename";
+    ren.textContent = "✎";
+    ren.addEventListener("click", function (e) { e.stopPropagation(); renameRow(row, m); });
+    row.appendChild(ren);
+    if (!isLive) {
+      var del = document.createElement("button");
+      del.className = "iconbtn";
+      del.type = "button";
+      del.title = "Delete";
+      del.textContent = "🗑";
+      del.addEventListener("click", function (e) { e.stopPropagation(); deleteRow(m); });
+      row.appendChild(del);
+    }
+    row.addEventListener("click", function () { openMeeting(m.id); });
     return row;
   }
 
-  function openHistory(meeting, row) {
-    row.disabled = true;
-    fetch("/api/history/open", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ meeting: meeting })
-    })
-      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
-      .then(function (res) {
-        row.disabled = false;
-        if (!res.ok) { fail(res.body.error || "That meeting couldn't be opened."); return; }
-        state.jobId = res.body.job_id;
-        state.meeting = res.body.meeting;
-        show("setup", false); show("history", false);
-        openResult(res.body.meeting);
-      })
-      .catch(function () { row.disabled = false; fail("That meeting couldn't be opened."); });
-  }
-
-  /* --------------------------------------------------------------- models */
-
-  // The dropdown defaults to whatever this card can actually hold, but the
-  // choice is the user's: they may know something the detection does not.
-  // Kept out of loadModels: that runs again after a download finishes, and
-  // registering the click handler twice would fire two fetches per press.
-  function initComponents() {
-    // A model this version wants that this install does not have. The updater
-    // cannot fix this for anyone upgrading from before it existed -- the update
-    // is performed by the *old* version's code -- so the new version has to ask
-    // for itself. One button; nothing is fetched without a press.
-    $("component-get").addEventListener("click", function () {
-      $("component-get").disabled = true;
-      fetch("/api/components/fetch", { method: "POST" })
-        .then(function () { pollComponents(); })
-        .catch(function () { $("component-get").disabled = false; });
+  function markActiveRow() {
+    var id = S.view ? S.view.id : "";
+    Array.prototype.forEach.call(document.querySelectorAll(".hrow"), function (r) {
+      r.classList.toggle("active", r.dataset.id === id);
     });
-    checkComponents();
   }
 
-  function loadModels() {
-    fetch("/api/models")
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        var sel = $("model");
-        var ext = d.external || { enabled: false, port: 9931 };
-        sel.textContent = "";
-        (d.models || []).forEach(function (m) {
-          var o = document.createElement("option");
-          o.value = m.key;
-          o.textContent = m.label + (m.available ? "" : "  (not downloaded)");
-          o.disabled = !m.available;
-          sel.appendChild(o);
-        });
-        // The third entry is not a model we ship but a server the user is
-        // already running. Never disabled: there is no file to check for, and
-        // whether anything is listening is only knowable by trying.
-        var port = document.createElement("option");
-        port.value = "external";
-        port.textContent = "Port";
-        sel.appendChild(port);
-
-        sel.value = d.selected || d.recommended;
-        $("port").value = ext.port || 9931;
-        state.recommended = d.recommended;
-        var gb = d.vram_mb ? (d.vram_mb / 1024).toFixed(1) + " GB" : "unknown";
-        var how = { cuda: "NVIDIA", vulkan: "Vulkan", cpu: "the processor" };
-        // Read the tier out of the model's own label rather than comparing
-        // against a hard-coded key: the High Quality key changed from
-        // "q4_k_m" to "iq4_xs" and this line silently began telling every
-        // machine that Low Quality was selected while High Quality ran.
-        var picked = (d.models || []).filter(function (m) {
-          return m.key === d.recommended;
-        })[0];
-        var tier = picked ? String(picked.label).split(":")[0].trim() : "a model";
-        var note = "Detected " + (d.device || "a graphics card") + " with " + gb +
-                   " of video memory, so " + tier +
-                   " is selected. You can change it.";
-        // Say so when transcription and the language model are not on the same
-        // backend -- it is the difference between a 50-minute stage and a
-        // 5-hour one, and the user should not have to guess.
-        if (d.llm_backend && d.whisper_backend &&
-            d.llm_backend !== d.whisper_backend) {
-          note += " Running the language model on " + (how[d.llm_backend] || d.llm_backend) +
-                  " and transcription on " + (how[d.whisper_backend] || d.whisper_backend) + ".";
-        }
-        // Kept so switching away from Port and back restores what the
-        // detection actually found, rather than leaving the port explanation
-        // sitting under a High Quality selection.
-        state.modelNote = note;
-        syncPort();
-        sel.addEventListener("change", function () {
-          syncPort();
-          saveChoice();
-          showEstimate();
-        });
-        // Save on blur, not on every keystroke: typing "9931" would otherwise
-        // post four times, and "9" on its own is a port we would reject.
-        $("port").addEventListener("change", saveChoice);
-        $("port").addEventListener("blur", saveChoice);
-      })
-      .catch(function () { /* the dropdown just stays empty; config still applies */ });
-  }
-
-  // Show the port box only when it means something, and describe what the
-  // choice does -- "Port" on its own tells the user nothing about the fact
-  // that we will not be loading a model of our own.
-  function syncPort() {
-    var external = $("model").value === "external";
-    $("port-field").hidden = !external;
-    $("model-note").textContent = external
-      ? "Sending the work to a language model already running on this " +
-        "computer at 127.0.0.1, on the port above. Nothing of ours is " +
-        "loaded, so the quality and the speed are whatever that server " +
-        "gives. Start it before pressing Process."
-      : (state.modelNote || "");
-  }
-
-  // Remembered whether or not a recording is ever processed, so that setting
-  // up a port and then closing the window does not lose the setting. Failures
-  // are shown but not fatal: the choice still applies to this session.
-  var lastSaved = "";
-
-  function saveChoice() {
-    var body = { model: $("model").value, port: $("port").value };
-    // `change` and `blur` both fire for one edit of the port box, and the
-    // dropdown re-saves on every switch. Skip a post that would write what
-    // is already there.
-    var signature = body.model + ":" + body.port;
-    if (signature === lastSaved) return;
-    lastSaved = signature;
-    fetch("/api/models/choice", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    })
-      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
-      .then(function (res) {
-        if (!res.ok) {
-          lastSaved = "";          // let the next attempt through
-          fail(res.body.error || "That choice couldn't be saved.");
-        } else {
-          $("setup-error").hidden = true;
-        }
-      })
-      .catch(function () { lastSaved = ""; });   // saving is a convenience
-  }
-
-  /* -------------------------------------------------------------- picking */
-
-  var drop = $("drop"), fileInput = $("file");
-
-  drop.addEventListener("click", function () { fileInput.click(); });
-  drop.addEventListener("keydown", function (e) {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
-  });
-  ["dragenter", "dragover"].forEach(function (ev) {
-    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add("over"); });
-  });
-  ["dragleave", "drop"].forEach(function (ev) {
-    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove("over"); });
-  });
-  drop.addEventListener("drop", function (e) {
-    if (e.dataTransfer.files && e.dataTransfer.files.length) { choose(e.dataTransfer.files[0]); }
-  });
-  fileInput.addEventListener("change", function () {
-    if (fileInput.files.length) { choose(fileInput.files[0]); }
-  });
-
-
-  function humanMB(bytes) {
-    // Decimal GB/MB, matching how the model dropdown and the docs quote sizes.
-    // Showing 13.3 GiB beside a dropdown that says 14.3 GB reads as two
-    // different files.
-    if (bytes >= 1e9) {
-      return (bytes / 1e9).toFixed(1).replace(/\.0$/, "") + " GB";
-    }
-    return Math.round(bytes / 1e6) + " MB";
-  }
-
-  function checkComponents() {
-    fetch("/api/components")
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        var box = $("component-notice");
-        if (!d.missing || !d.missing.length) { box.hidden = true; return; }
-        var names = d.missing.map(function (m) { return m.name; }).join(" and ");
-        // Each component says what is lost without it: "speaker attribution is
-        // worse" is true of the aligner and nonsense about a language model.
-        var why = d.missing.map(function (m) { return m.reason; })
-                           .filter(Boolean).join(", and ");
-        $("component-text").textContent =
-          names + (d.missing.length > 1 ? " aren't" : " isn't") + " installed. " +
-          "Recordings will still process" + (why ? ", but " + why : "") +
-          ". One download of about " + humanMB(d.bytes) + ".";
-        box.hidden = false;
-        if (d.busy) { pollComponents(); }
-      })
-      .catch(function () { /* offline is fine; the app works regardless */ });
-  }
-
-  function pollComponents() {
-    $("component-get").disabled = true;
-    $("component-bar").hidden = false;
-    if (components.timer) { return; }
-    components.timer = setInterval(function () {
-      fetch("/api/update/progress")
-        .then(function (r) { return r.json(); })
-        .then(function (p) {
-          if (p.total) {
-            $("component-fill").style.width = (p.downloaded / p.total * 100) + "%";
-            $("component-text").textContent = p.message + " — " +
-              humanSize(p.downloaded) + " of " + humanSize(p.total);
-          }
-          if (p.phase === "error") {
-            clearInterval(components.timer); components.timer = null;
-            $("component-text").textContent = p.message;
-            $("component-get").disabled = false;
-            $("component-bar").hidden = true;
-          } else if (p.phase === "idle" && p.total === 0) {
-            clearInterval(components.timer); components.timer = null;
-            $("component-notice").hidden = true;
-            // The dropdown was built when the page loaded, with the new model
-            // marked "not downloaded" and disabled. It is downloaded now, so
-            // rebuild it rather than making the user press F5 to discover
-            // that the thing they just waited for is selectable.
-            loadModels();
-          }
-        })
-        .catch(function () { /* transient */ });
-    }, 500);
-  }
-
-  function humanSize(n) {
-    if (n >= 1e9) return (n / 1e9).toFixed(2) + " GB";
-    if (n >= 1e6) return (n / 1e6).toFixed(0) + " MB";
-    return (n / 1e3).toFixed(0) + " KB";
-  }
-
-  function humanClock(sec) {
-    sec = Math.round(sec);
-    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
-    return h > 0 ? h + "h " + m + "m" : m + "m " + (sec % 60) + "s";
-  }
-
-  function choose(file) {
-    state.file = file;
-    $("setup-error").hidden = true;
-    $("fi-name").textContent = file.name;
-    $("fi-size").textContent = humanSize(file.size);
-    $("fi-duration").textContent = "reading…";
-    $("fi-estimate").textContent = "—";
-    $("fi-note").textContent = "";
-    show("fileinfo", true);
-    $("process").disabled = true;
-    upload(file);
-  }
-
-  /* ------------------------------------------------------------- uploading */
-
-  function upload(file) {
-    var xhr = new XMLHttpRequest();
-    xhr.open("POST", "/api/upload?filename=" + encodeURIComponent(file.name));
-    xhr.setRequestHeader("Content-Type", "application/octet-stream");
-
-    xhr.upload.onprogress = function (e) {
-      if (!e.lengthComputable) return;
-      var pct = Math.round((e.loaded / e.total) * 100);
-      $("fi-duration").textContent = "uploading " + pct + "%";
-    };
-
-    xhr.onload = function () {
-      var body = {};
-      try { body = JSON.parse(xhr.responseText); } catch (err) { /* fall through */ }
-      if (xhr.status !== 200) {
-        $("fi-duration").textContent = "—";
-        fail(body.error || "That file couldn't be read.");
-        return;
-      }
-      state.jobId = body.job_id;
-      state.estimates = body.estimates || {};
-      state.durationS = body.duration_s;
-      $("fi-duration").textContent = body.duration_hms;
-      showEstimate();
-      $("process").disabled = false;
-    };
-
-    xhr.onerror = function () { fail("The upload didn't complete."); };
-    xhr.send(file);
-  }
-
-  // "Both" adds one extra final-reduce call over the same notes, not a second
-  // pipeline, so the extra cost is modest but worth mentioning.
-  $("mode").addEventListener("change", function () {
-    showEstimate();
-    saveMode();
-  });
-
-  // Remembered across launches, like the Model dropdown's Port. Which document
-  // somebody wants is a fact about them and their meetings, not something the
-  // machine can detect, so the last choice is the best default available.
-  var lastMode = "";
-
-  function saveMode() {
-    var mode = $("mode").value;
-    if (mode === lastMode) return;
-    lastMode = mode;
-    fetch("/api/mode", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: mode })
-    })
-      .then(function (r) { if (!r.ok) lastMode = ""; })
-      .catch(function () { lastMode = ""; });   // saving is a convenience
-  }
-
-  // Applied before the estimate is drawn, so the figure matches the dropdown.
-  // A value this build does not offer is ignored: the server falls back, and
-  // the markup's own `selected` stands.
-  fetch("/api/mode")
-    .then(function (r) { return r.json(); })
-    .then(function (d) {
-      var sel = $("mode"), want = String(d && d.mode || "");
-      for (var i = 0; i < sel.options.length; i++) {
-        if (sel.options[i].value === want) {
-          sel.value = want;
-          break;
-        }
-      }
-      lastMode = sel.value;
-      showEstimate();
-    })
-    .catch(function () {});     // the default in the markup stands
-
-  function showEstimate() {
-    if (!state.durationS) return;
-    var mode = $("mode").value, both = mode === "both";
-    var perModel = state.estimates[$("model").value] || {};
-    var mins = perModel[mode];
-
-    // Null means nothing has been measured on this machine with this model.
-    // Say so. The old behaviour was a hardcoded rate that quoted 2 minutes for
-    // a job that took 10, which is worse than no number at all.
-    if (!mins) {
-      $("fi-estimate").textContent = "not known yet";
-      $("fi-note").textContent =
-        "This recording is " + humanClock(state.durationS) + ". This is the " +
-        "first run on this computer with this model, so there is no reliable " +
-        "time estimate yet — it will be timed as it goes, and every " +
-        "recording after this one will be estimated up front. Expect it to " +
-        "take a while; you can leave this window open and come back.";
-      return;
-    }
-    $("fi-estimate").textContent = "about " + mins + " minutes";
-    $("fi-note").textContent =
-      "This recording is " + humanClock(state.durationS) + ". Processing will take " +
-      "roughly " + mins + " minutes" +
-      (both ? ", producing both a summary and minutes" : "") +
-      ". You can leave this window open and come back.";
-  }
-
-  function fail(msg) {
-    $("setup-error").textContent = msg;
-    $("setup-error").hidden = false;
-  }
-
-  /* ------------------------------------------------------------ processing */
-
-  $("process").addEventListener("click", function () {
-    if (!state.jobId) return;
-    $("process").disabled = true;
-    fetch("/api/jobs/" + state.jobId + "/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: $("mode").value,
-                             num_speakers: $("speakers").value,
-                             model: $("model").value })
-    })
-      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
-      .then(function (res) {
-        if (!res.ok) { $("process").disabled = false; fail(res.body.error || "Couldn't start."); return; }
-        state.phase = "run";
-        state.tab = null;
-        show("setup", false);
-        show("history", false);
-        show("another", false);
-        show("progress", true);
-        $("log").textContent = "";
-        state.started = Date.now();
-        startClock();
-        listen();
-      })
-      .catch(function () { $("process").disabled = false; fail("Couldn't start."); });
-  });
-
-  function startClock() {
-    stopClock();
-    state.timer = setInterval(function () {
-      var s = Math.floor((Date.now() - state.started) / 1000);
-      $("elapsed").textContent = Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2);
-    }, 1000);
-  }
-  function stopClock() { if (state.timer) { clearInterval(state.timer); state.timer = null; } }
-
-  function listen() {
-    if (state.events) state.events.close();
-    var es = new EventSource("/api/events/" + state.jobId);
-    state.events = es;
-
-    es.onmessage = function (e) {
-      var ev;
-      try { ev = JSON.parse(e.data); } catch (err) { return; }
-
-      if (ev.type === "status") {
-        // Trust the server's elapsed over the local clock: after a reload the
-        // page has no idea when the job actually started.
-        if (ev.elapsed) state.started = Date.now() - ev.elapsed * 1000;
-        $("stage-label").textContent = ev.stage_label || "Working";
-        $("stage-msg").textContent = ev.message || "";
-        $("pct").textContent = Math.round(ev.percent) + "%";
-        $("bar-fill").style.width = ev.percent + "%";
-        // Live ETA from this run's own progress, which already accounts for the
-        // machine, the recording and the settings. Far better than any constant.
-        $("remaining").textContent =
-          (ev.remaining === null || ev.remaining === undefined)
-            ? "" : "about " + humanClock(ev.remaining) + " left";
-      } else if (ev.type === "log") {
-        var box = $("log");
-        var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-        box.textContent += ev.line + "\n";
-        if (atBottom) box.scrollTop = box.scrollHeight;
-      } else if (ev.type === "done") {
-        es.close(); stopClock(); finish(ev);
-      } else if (ev.type === "error") {
-        es.close(); stopClock();
-        show("progress", false); show("failed", true);
-        $("fail-msg").textContent = ev.message;
-      } else if (ev.type === "cancelled") {
-        es.close(); stopClock();
-        show("progress", false);
-        if (state.phase === "generate") {
-          // Nothing was lost: the meeting behind this is still finished, so go
-          // back to it rather than to an empty upload form.
-          state.phase = "run";
-          openResult(state.meeting || "Finished");
-        } else {
-          show("setup", true);
-          $("process").disabled = true;
-          show("fileinfo", false);
-          state.jobId = null;
-          loadHistory();
-        }
-      }
-    };
-  }
-
-  $("cancel").addEventListener("click", function () {
-    $("cancel").disabled = true;
-    fetch("/api/jobs/" + state.jobId + "/cancel", { method: "POST" })
-      .finally(function () { $("cancel").disabled = false; });
-  });
-
-  /* --------------------------------------------------------------- result */
-
-  function finish(ev) {
-    openResult("Finished in " + humanClock(ev.elapsed), ev.document_error);
-  }
-
-  // Shared by a completed run, a reopened meeting from the history list, and
-  // the end of a rewrite -- all three land on exactly the same page.
-  function openResult(title, documentError) {
-    fetch("/api/jobs/" + state.jobId + "/result")
-      .then(function (r) { return r.json(); })
-      .then(function (docs) {
-        state.docs = docs;
-        show("progress", false);
-        show("failed", false);
-        show("result", true);
-        $("result-title").textContent = title || "Finished";
-        $("build-error").hidden = true;
-
-        var note = $("result-note");
-        if (documentError) {
-          note.textContent = documentError +
-            " The full transcript below was produced successfully.";
-          note.hidden = false;
-        } else {
-          note.hidden = true;
-        }
-
-        // One transcript tab. When names have been applied the named version
-        // is the one worth reading, so it takes the slot -- the raw labelled
-        // file is still on disk, which is what it is for.
-        if (docs.tagged) { docs.transcript = docs.tagged; }
-        var keys = [];
-        ["summary", "minutes", "transcript"].forEach(function (k) {
-          if (docs[k]) keys.push(k);
-        });
-
-        var tabs = $("tabs");
-        tabs.hidden = keys.length < 2;
-        Array.prototype.forEach.call(tabs.querySelectorAll(".tab"), function (t) {
-          t.hidden = keys.indexOf(t.dataset.target) === -1;
-        });
-        if (keys.length) select(keys.indexOf(state.tab) === -1 ? keys[0] : state.tab);
-        buildButtons(docs);
-        show("another", true);
-        loadSpeakers();
-      });
-  }
-
-  /* -------------------------------------------------- generate / regenerate */
-
-  // A run produces whichever document was asked for. Wanting the other one
-  // afterwards, or wanting one rewritten now that the speakers have names,
-  // should cost a single final-reduce call -- not the recording again.
-  function buildButtons(docs) {
-    var can = !!docs._can_rebuild;
-    ["summary", "minutes"].forEach(function (mode) {
-      var btn = $("gen-" + mode);
-      var have = !!docs[mode];
-      var noun = mode === "minutes" ? "minutes" : "summary";
-      btn.textContent = have ? "Regenerate the " + noun : "Generate " + noun;
-      btn.disabled = !can;
-    });
-    if (!can) {
-      $("build-note").textContent =
-        "The working notes for this meeting are gone, so it can't be rebuilt.";
-      return;
-    }
-    // Writing a document is the heaviest single step in the pipeline and on a
-    // long recording it is not "a few minutes". Quote the same measured figure
-    // the estimate on the first screen is built from.
-    var mins = docs._rebuild_minutes;
-    $("build-note").textContent = mins
-      ? "About " + mins + " minute" + (mins === 1 ? "" : "s") +
-        " on this machine — the model writes the whole document again. " +
-        "The recording itself is not processed again."
-      : "The model writes the whole document again, which on a long recording " +
-        "can take a while. The recording itself is not processed again.";
-  }
-
-  Array.prototype.forEach.call(document.querySelectorAll("#build .btn"), function (btn) {
-    btn.addEventListener("click", function () {
-      if (!state.jobId) return;
-      $("build-error").hidden = true;
-      fetch("/api/jobs/" + state.jobId + "/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: btn.dataset.mode })
-      })
-        .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
-        .then(function (res) {
-          if (!res.ok) {
-            $("build-error").textContent = res.body.error || "That couldn't be started.";
-            $("build-error").hidden = false;
-            return;
-          }
-          state.phase = "generate";
-          state.tab = btn.dataset.mode;
-          show("result", false); show("naming", false); show("another", false);
-          show("progress", true);
-          $("log").textContent = "";
-          state.started = Date.now();
-          startClock();
-          listen();
-        })
-        .catch(function () {
-          $("build-error").textContent = "That couldn't be started.";
-          $("build-error").hidden = false;
-        });
-    });
-  });
-
-  /* ------------------------------------------------------- speaker naming */
-
-  // One <audio> reused for every clip: several players on a page invites two
-  // voices at once, which defeats the point of listening to tell them apart.
-  var player = new Audio();
-  var playingBtn = null;
-
-  function playClip(url, btn) {
-    if (playingBtn) { playingBtn.textContent = "▶"; }
-    if (playingBtn === btn && !player.paused) {
-      player.pause(); playingBtn = null; return;
-    }
-    player.src = url;
-    player.play().then(function () {
-      btn.textContent = "■";
-      playingBtn = btn;
-    }).catch(function () { btn.textContent = "▶"; });
-  }
-  player.addEventListener("ended", function () {
-    if (playingBtn) { playingBtn.textContent = "▶"; playingBtn = null; }
-  });
-
-  function loadSpeakers() {
-    fetch("/api/jobs/" + state.jobId + "/speakers")
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        var rows = d.speakers || [];
-        if (!rows.length) { show("naming", false); return; }
-        state.meeting = d.meeting;
-        var host = $("speaker-rows");
-        host.textContent = "";
-        rows.forEach(function (row) { host.appendChild(speakerRow(d.meeting, row)); });
-        show("naming", true);
-      })
-      .catch(function () { show("naming", false); });
-  }
-
-  function speakerRow(meeting, row) {
-    var wrap = document.createElement("div");
-    wrap.className = "spk-row";
-    wrap.dataset.speaker = row.speaker;
-
-    var head = document.createElement("div");
-    head.className = "spk-head";
-
-    var tag = document.createElement("span");
-    tag.className = "spk-tag";
-    tag.textContent = row.label;
-    head.appendChild(tag);
-
+  function renameRow(row, m) {
+    var main = row.querySelector(".hmain");
     var input = document.createElement("input");
-    input.type = "text";
-    input.className = "spk-name";
-    input.placeholder = "name (optional)";
-    input.value = row.name || "";
-    input.dataset.speaker = row.speaker;
-    head.appendChild(input);
-
-    var secs = document.createElement("span");
-    secs.className = "spk-secs";
-    secs.textContent = row.clips.length + " samples";
-    head.appendChild(secs);
-
-    wrap.appendChild(head);
-
-    row.clips.forEach(function (clip) {
-      var line = document.createElement("div");
-      line.className = "clip";
-
-      var btn = document.createElement("button");
-      btn.className = "clip-play";
-      btn.type = "button";
-      btn.textContent = "▶";
-      btn.title = "Play " + clip.duration + " seconds from " + clip.start_hms;
-      var url = "/api/samples/" + encodeURIComponent(meeting) + "/" + clip.file;
-      btn.addEventListener("click", function () { playClip(url, btn); });
-      line.appendChild(btn);
-
-      var ts = document.createElement("span");
-      ts.className = "clip-ts";
-      ts.textContent = clip.start_hms;
-      line.appendChild(ts);
-
-      var txt = document.createElement("span");
-      txt.className = "clip-text";
-      txt.textContent = clip.text;
-      line.appendChild(txt);
-
-      wrap.appendChild(line);
-    });
-
-    return wrap;
-  }
-
-  $("apply-names").addEventListener("click", function () {
-    var names = {};
-    Array.prototype.forEach.call(document.querySelectorAll(".spk-name"), function (i) {
-      if (i.value.trim()) names[i.dataset.speaker] = i.value.trim();
-    });
-    if (!Object.keys(names).length) {
-      $("naming-error").textContent = "Type at least one name first.";
-      $("naming-error").hidden = false;
-      return;
-    }
-    $("naming-error").hidden = true;
-    $("apply-names").disabled = true;
-    fetch("/api/jobs/" + state.jobId + "/names", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ names: names })
-    })
-      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
-      .then(function (res) {
-        $("apply-names").disabled = false;
-        if (!res.ok) {
-          $("naming-error").textContent = res.body.error || "Couldn't apply those names.";
-          $("naming-error").hidden = false;
-          return;
-        }
-        // Substitution, not generation: the files are already rewritten, so
-        // just reload them. The tab in view is kept.
-        var done = $("naming-done");
-        done.hidden = false;
-        setTimeout(function () { done.hidden = true; }, 2500);
-        state.tab = state.tab || currentTab();
-        openResult($("result-title").textContent);
-      })
-      .catch(function () {
-        $("apply-names").disabled = false;
-        $("naming-error").textContent = "Couldn't apply those names.";
-        $("naming-error").hidden = false;
-      });
-  });
-
-  Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (tab) {
-    tab.addEventListener("click", function () { select(tab.dataset.target); });
-  });
-
-  function currentTab() {
-    var active = document.querySelector(".tab.active");
-    return active ? active.dataset.target : null;
-  }
-
-  function select(key) {
-    state.tab = key;
-    Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (t) {
-      t.classList.toggle("active", t.dataset.target === key);
-    });
-    var d = state.docs[key];
-    $("doc").innerHTML = d ? renderMarkdown(d.markdown) : "";
-  }
-
-  // A speaker label in the transcript is the natural place to think "who is
-  // that?", so clicking one jumps to that speaker's row in the naming panel
-  // and puts the cursor in the box, with its clips a keypress away.
-  $("doc").addEventListener("click", function (e) {
-    var tag = e.target.closest ? e.target.closest(".spk") : null;
-    if (!tag) return;
-    var label = tag.textContent.trim();
-    var rows = document.querySelectorAll("#speaker-rows .spk-row");
-    for (var i = 0; i < rows.length; i++) {
-      var t = rows[i].querySelector(".spk-tag");
-      var n = rows[i].querySelector(".spk-name");
-      if (!t) continue;
-      // Match the label, or the name already typed against it -- once the
-      // transcript is renamed, the label no longer appears in it.
-      if (t.textContent.trim() === label || (n && n.value.trim() === label)) {
-        show("naming", true);
-        rows[i].scrollIntoView({ behavior: "smooth", block: "center" });
-        rows[i].classList.add("flash");
-        setTimeout(function (r) { return function () { r.classList.remove("flash"); }; }(rows[i]), 1200);
-        if (n) n.focus();
-        return;
+    input.value = m.name;
+    main.innerHTML = "";
+    main.appendChild(input);
+    input.focus();
+    input.select();
+    var done = false;
+    function finish(save) {
+      if (done) return;
+      done = true;
+      var name = input.value.trim();
+      if (save && name && name !== m.name) {
+        api("POST", "/api/history/" + encodeURIComponent(m.id) + "/rename", { name: name })
+          .then(function () {
+            if (S.view && S.view.id === m.id) {
+              S.view.name = name;
+              if (!S.view.live) $("view-name").textContent = name;
+            }
+          })
+          .catch(function (e) { banner(e.message, "error"); })
+          .then(loadHistory);
+      } else {
+        loadHistory();
       }
     }
-  });
-
-  $("open-folder").addEventListener("click", function () {
-    fetch("/api/open-output", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ meeting: state.meeting || "" })
+    input.addEventListener("click", function (e) { e.stopPropagation(); });
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") finish(true);
+      if (e.key === "Escape") finish(false);
     });
+    input.addEventListener("blur", function () { finish(true); });
+  }
+
+  function deleteRow(m) {
+    confirmModal("Delete meeting",
+      "Delete this meeting's transcript, notes and summary? This can't be undone.",
+      "Delete", true).then(function (yes) {
+      if (!yes) return;
+      api("DELETE", "/api/history/" + encodeURIComponent(m.id)).then(function () {
+        if (S.view && S.view.id === m.id) {
+          if (S.liveId) openMeeting(S.liveId);
+          else showMeeting({ id: "", name: "", live: false, lines: [], blocks: [], summary: "",
+                             has_summary: false });
+        }
+        loadHistory();
+      }).catch(function (e) { banner(e.message, "error"); });
+    });
+  }
+
+  $("side-toggle").addEventListener("click", function () {
+    var side = $("sidebar");
+    side.classList.toggle("collapsed");
+    $("side-toggle").textContent = side.classList.contains("collapsed") ? "›" : "‹";
   });
 
-  $("again").addEventListener("click", reset);
-  $("retry").addEventListener("click", reset);
+  /* ---------------------------------------------------------------- modal */
 
-  function reset() {
-    if (state.events) state.events.close();
-    stopClock();
-    state.jobId = null; state.file = null; state.docs = {};
-    state.phase = "run"; state.tab = null;
-    fileInput.value = "";
-    show("result", false); show("failed", false); show("progress", false);
-    show("naming", false); show("another", false);
-    show("fileinfo", false); show("setup", true);
-    loadHistory();
-    $("process").disabled = true;
-    $("setup-error").hidden = true;
-    $("log").textContent = "";
-    $("bar-fill").style.width = "0";
-    $("pct").textContent = "0%";
+  var modalResolve = null;
+
+  function confirmModal(title, text, okLabel, danger) {
+    $("modal-title").textContent = title;
+    $("modal-text").textContent = text;
+    $("modal-ok").textContent = okLabel || "Continue";
+    $("modal-ok").classList.toggle("danger", !!danger);
+    $("modal").hidden = false;
+    $("modal-ok").focus();
+    return new Promise(function (resolve) { modalResolve = resolve; });
   }
+
+  function closeModal(answer) {
+    $("modal").hidden = true;
+    if (modalResolve) { var r = modalResolve; modalResolve = null; r(answer); }
+  }
+
+  $("modal-ok").addEventListener("click", function () { closeModal(true); });
+  $("modal-cancel").addEventListener("click", function () { closeModal(false); });
+  $("modal").addEventListener("click", function (e) { if (e.target === $("modal")) closeModal(false); });
+
+  /* ---------------------------------------------------------------- diagnostics */
 
   $("copy-diag").addEventListener("click", function () {
     fetch("/api/diagnostics")
       .then(function (r) { return r.text(); })
       .then(function (text) {
         var btn = $("copy-diag");
-        var done = function () { btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy diagnostic info"; }, 1800); };
+        var done = function () {
+          btn.textContent = "Copied";
+          setTimeout(function () { btn.textContent = "Copy diagnostic info"; }, 1800);
+        };
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(text).then(done, function () { legacyCopy(text); done(); });
         } else { legacyCopy(text); done(); }
@@ -954,111 +841,34 @@
     return esc(s)
       .replace(/`([^`]+)`/g, "<code>$1</code>")
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
+      .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
+      .replace(/(^|[^_\w])_([^_]+)_(?=$|[^_\w])/g, "$1<em>$2</em>");
   }
 
-  function isRow(line) {
-    return typeof line === "string" && /^\s*\|.*\|\s*$/.test(line);
-  }
-
-  // The ---|---|--- line under the header. Colons for alignment are accepted
-  // and ignored: nothing the pipeline emits depends on them.
-  function isDivider(line) {
-    return typeof line === "string" && /^\s*\|[\s:|-]+\|\s*$/.test(line) &&
-           line.indexOf("-") !== -1;
-  }
-
-  function cells(line) {
-    var t = line.trim().replace(/^\|/, "").replace(/\|$/, "");
-    return t.split("|").map(function (c) { return c.trim(); });
-  }
-
-  function table(head, body) {
-    var html = '<div class="tablewrap"><table><thead><tr>';
-    head.forEach(function (c) { html += "<th>" + inline(c) + "</th>"; });
-    html += "</tr></thead><tbody>";
-    body.forEach(function (row) {
-      html += "<tr>";
-      for (var c = 0; c < head.length; c++) {
-        html += "<td>" + inline(row[c] === undefined ? "" : row[c]) + "</td>";
-      }
-      html += "</tr>";
-    });
-    return html + "</tbody></table></div>";
-  }
-
-  // Just enough Markdown for what the pipeline emits: headings, bullets,
-  // checkboxes, rules, tables, and the [SPEAKER_nn] (hh:mm:ss) transcript form.
+  // Just enough Markdown for what the model writes: headings, bullets,
+  // numbered lists, rules, bold and italics.
   function renderMarkdown(md) {
     var out = [], list = null;
-    var lines = md.split(/\r?\n/);
-
+    var lines = (md || "").split(/\r?\n/);
     function closeList() { if (list) { out.push("</" + list + ">"); list = null; } }
-
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i];
-
-      // Accepts a real name as well as SPEAKER_nn: once the transcript has
-      // been renamed the labels are gone, and it should still render as speech.
-      var turn = line.match(/^\[([^\]]{1,60})\]\s*\((\d{2}:\d{2}:\d{2})\)\s*(.*)$/);
-      if (turn) {
-        closeList();
-        out.push('<p class="turn"><span class="spk" title="Name this speaker">' +
-                 esc(turn[1]) + '</span> ' +
-                 '<span class="ts">(' + turn[2] + ')</span> ' + inline(turn[3]) + "</p>");
-        continue;
-      }
-      var plain = line.match(/^\((\d{2}:\d{2}:\d{2})\)\s*(.*)$/);
-      if (plain) {
-        closeList();
-        out.push('<p class="turn"><span class="ts">(' + plain[1] + ')</span> ' + inline(plain[2]) + "</p>");
-        continue;
-      }
-
-      // Markdown tables. The reduce prompts ask for a Participants section
-      // with speaker, inferred name and confidence, and the model quite
-      // reasonably answers with a table -- which rendered as a stack of
-      // pipe-laden paragraphs until this existed.
-      if (isRow(line) && isDivider(lines[i + 1])) {
-        closeList();
-        var head = cells(line);
-        var body = [];
-        i += 2;
-        while (i < lines.length && isRow(lines[i])) { body.push(cells(lines[i])); i++; }
-        i--;
-        out.push(table(head, body));
-        continue;
-      }
-
       var h = line.match(/^(#{1,4})\s+(.*)$/);
       if (h) { closeList(); out.push("<h" + h[1].length + ">" + inline(h[2]) + "</h" + h[1].length + ">"); continue; }
-
       if (/^---+\s*$/.test(line)) { closeList(); out.push("<hr>"); continue; }
-
-      var task = line.match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
-      if (task) {
-        if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; }
-        out.push("<li><input type=\"checkbox\" disabled" +
-                 (task[1].toLowerCase() === "x" ? " checked" : "") + "> " + inline(task[2]) + "</li>");
-        continue;
-      }
-
       var bullet = line.match(/^\s*[-*]\s+(.*)$/);
       if (bullet) {
         if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; }
         out.push("<li>" + inline(bullet[1]) + "</li>");
         continue;
       }
-
       var num = line.match(/^\s*\d+\.\s+(.*)$/);
       if (num) {
         if (list !== "ol") { closeList(); out.push("<ol>"); list = "ol"; }
         out.push("<li>" + inline(num[1]) + "</li>");
         continue;
       }
-
       if (line.trim() === "") { closeList(); continue; }
-
       closeList();
       out.push("<p>" + inline(line) + "</p>");
     }
@@ -1068,21 +878,23 @@
 
   /* ----------------------------------------------------------- about */
 
-  // The only outbound request the app ever makes lives behind this button.
-  // Everything about the check goes through the server: the page never talks
-  // to an external host, so section 16's rule about the frontend holds.
+  // The only outbound request the app ever makes lives behind this button,
+  // and it goes through the server: the page never talks to an external host.
+  var about = { timer: null, pending: null };
 
-  var about = { url: "", timer: null };
+  function humanSize(n) {
+    if (!n) return "0 MB";
+    return n >= 1e9 ? (n / 1e9).toFixed(1) + " GB" : Math.max(1, Math.round(n / 1e6)) + " MB";
+  }
 
   function openAbout() {
-    show("about", true);
+    $("about").hidden = false;
     resetUpdate();
     fetch("/api/about")
       .then(function (r) { return r.json(); })
       .then(function (d) {
         $("about-author").textContent = d.author || "";
         $("about-version").textContent = d.version || "";
-        about.url = d.repo_url || "";
         var link = $("about-repo");
         link.textContent = (d.repo_url || "").replace(/^https:\/\//, "");
         link.href = d.repo_url || "#";
@@ -1091,7 +903,7 @@
   }
 
   function closeAbout() {
-    show("about", false);
+    $("about").hidden = true;
     if (about.timer) { clearInterval(about.timer); about.timer = null; }
   }
 
@@ -1113,11 +925,11 @@
 
   $("about-open").addEventListener("click", openAbout);
   $("about-close").addEventListener("click", closeAbout);
-  $("about").addEventListener("click", function (e) {
-    if (e.target === $("about")) closeAbout();      // click the backdrop
-  });
+  $("about").addEventListener("click", function (e) { if (e.target === $("about")) closeAbout(); });
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape" && !$("about").hidden) closeAbout();
+    if (e.key !== "Escape") return;
+    if (!$("modal").hidden) closeModal(false);
+    else if (!$("about").hidden) closeAbout();
   });
 
   $("update-check").addEventListener("click", function () {
@@ -1154,17 +966,9 @@
     $("update-check").disabled = true;
     $("update-cancel").hidden = false;
     $("update-bar").hidden = false;
-    fetch("/api/update/install", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: d.url, size_bytes: d.size_bytes, tag: d.latest })
-    })
-      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
-      .then(function (res) {
-        if (!res.ok) { resetUpdate(); updateMsg(res.body.error || "Couldn't start."); return; }
-        pollUpdate();
-      })
-      .catch(function () { resetUpdate(); updateMsg("Couldn't start the update."); });
+    api("POST", "/api/update/install", { url: d.url, size_bytes: d.size_bytes, tag: d.latest })
+      .then(pollUpdate)
+      .catch(function (e) { resetUpdate(); updateMsg(e.message); });
   });
 
   $("update-cancel").addEventListener("click", function () {
@@ -1177,31 +981,18 @@
       fetch("/api/update/progress")
         .then(function (r) { return r.json(); })
         .then(function (p) {
-          // Bytes, not just a percentage: a bare percentage does not tell you
-          // whether it is stuck.
           if (p.total) {
             $("update-fill").style.width = (p.downloaded / p.total * 100) + "%";
-            updateMsg(p.message + " — " + humanSize(p.downloaded) +
-                      " of " + humanSize(p.total));
+            updateMsg(p.message + " — " + humanSize(p.downloaded) + " of " + humanSize(p.total));
           } else if (p.message) {
             updateMsg(p.message);
           }
-          // Nothing left to abort once the download is done.
           if (p.phase !== "downloading") $("update-cancel").hidden = true;
           if (p.phase === "restarting") {
             clearInterval(about.timer); about.timer = null;
             $("update-fill").style.width = "100%";
-            // A model this version needs may have failed to download. The
-            // update is still good -- the app runs without it -- but saying
-            // nothing would leave the user with quietly worse output and no
-            // idea why.
-            updateMsg("Update ready. The application will close and reopen by " +
-                      "itself — this page will reconnect." +
-                      (p.extra_failed
-                        ? " One optional download didn't arrive (" +
-                          p.extra_failed + "). Everything works without it; " +
-                          "to fetch it, run DOWNLOAD_MODELS.bat or update again."
-                        : ""));
+            updateMsg("Update ready. The application will close and reopen by itself — " +
+                      "this page will reconnect.");
           } else if (p.phase === "error") {
             clearInterval(about.timer); about.timer = null;
             resetUpdate();
@@ -1216,5 +1007,5 @@
     }, 500);
   }
 
-  waitForServer(0);
+  waitForServer();
 })();

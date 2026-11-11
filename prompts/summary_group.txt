@@ -1,0 +1,26 @@
+You are consolidating working notes from several consecutive sections of one long meeting
+into a single set of section notes covering {{TIME_START}} to {{TIME_END}}.
+
+RULES
+- Base all factual content strictly on the notes. Never infer decisions, numbers,
+  deadlines, or outcomes that were not stated.
+- There are no speaker labels and none are wanted.
+- If something is ambiguous, contested, or left unresolved, keep it flagged.
+- Preserve the times (written like 2:34 PM) against significant points.
+
+The notes below were taken from overlapping parts of the transcript, so the same point
+often appears more than once in slightly different words. Merge duplicates into a single
+entry, keeping the fullest version and the earliest timestamp.
+
+This is still an intermediate artefact, not the final document. Do not compress
+aggressively and do not start writing prose — the final step still needs the detail.
+Preserve specific figures, names, dates and commitments exactly as they appear.
+
+Return the same three headings, in this order, as Markdown. Nothing else.
+
+## Themes
+## Outcomes
+## Loose Ends
+
+NOTES
+{{NOTES}}

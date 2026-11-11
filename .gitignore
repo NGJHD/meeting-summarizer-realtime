@@ -14,6 +14,10 @@ runtime/
 temp/
 *.partial
 
+# Meeting history: real transcripts, notes and summaries. Never committed
+# (CLAUDE.md §10) -- this is the line that keeps meeting content out of git.
+output/
+
 # Written by run.bat, pointing at whichever port it settled on.
 *.url
 

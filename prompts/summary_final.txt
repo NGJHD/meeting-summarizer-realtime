@@ -1,0 +1,58 @@
+You are writing the final summary of a meeting from the working notes below. The reader
+may not have attended and will not read the transcript. This document is all they will see.
+
+They will not see the notes either, and they do not know the recording was processed in
+pieces. So never mention the notes, a section, a part or a chunk: write about the
+meeting, not about your source. Where the notes record that something is unclear or was
+never stated, that is a fact about the meeting - "no owner was named", "it was left
+unresolved" - not a fact about the notes.
+
+Meeting: {{MEETING_NAME}}
+Duration: {{DURATION}}
+
+RULES
+- Base all factual content strictly on the notes. Never infer decisions, numbers,
+  deadlines, or outcomes that were not stated. Never invent a decision.
+- Do not attribute anything to a speaker. There are no speaker labels and none are wanted.
+- The transcript was machine-generated and partly machine-translated from Mandarin. Use
+  the most plausible form of a term that appears in several spellings. Do not comment on
+  transcription or translation quality.
+- If something is ambiguous, contested, or left unresolved, say so rather than smoothing
+  it over.
+
+Organise the document BY TOPIC, not chronologically. This matters more than any other
+instruction here. A chronological retelling reproduces the meeting's own disorder, where
+one topic is raised, dropped, and returned to twice. Gather everything said about a topic
+into one place, however scattered it was in time, and give the reader its resolved state.
+Where a topic was discussed at several points, mention those times together. Times are
+the real clock times they were said at, written like 2:34 PM.
+
+A heading may join closely related aspects of one subject: "Budget Review & Forecasting" is
+one topic. It may not join separate systems, products or deliverables that merely happen
+to be the same kind of thing — "Payroll, CRM & Ticketing Portal" is three topics and must
+be split into three. The test is whether a reader looking for one of the things named in
+the heading would find everything the meeting said about it underneath.
+
+Return exactly this structure as Markdown, with no preamble and no closing commentary.
+There is no executive summary, no participants list, and no separate list of decisions or
+action items: everything belongs inside the topic it arose in.
+
+# Meeting summary — {{MEETING_NAME}}
+*Duration: {{DURATION}}*
+
+## <Topic>
+One or more paragraphs of plain, flowing sentences about what was discussed. Give each
+topic the space its importance warrants rather than an equal share.
+
+End each topic with a sentence or two saying how it ended: what was decided or agreed,
+and roughly when (for example "They agreed at around 2:34 PM to…"), or, if nothing was
+settled, that it was left open and what remained unresolved.
+
+(repeat ## <Topic> for every topic)
+
+Write ONLY in sentences and paragraphs. No bullet points, no numbered lists, no tables, no
+bold labels such as "Conclusion:". The only formatting is the title, the duration line and
+one ## heading per topic.
+
+NOTES
+{{NOTES}}

@@ -268,6 +268,10 @@ file the batch app used is ggml format and cannot be loaded by onnxruntime.
   decided. Hallucination is handled after recognition (§6), where the text is visible.
 - Each utterance carries its start time in **session time** (seconds since Start, from the
   sample count, not the wall clock — the sample count cannot drift).
+- **Every time shown to the user is real clock time, 12-hour** — `2:34:05 PM` on transcript
+  lines, `2:30 – 2:35 PM` on a note, `2:34 PM` in the full summary — computed as the
+  meeting's start (the first captured sample) plus session time. Never "time since Start"
+  (operator's choice, 2026-11-11: this is a real-time app). Session time stays internal.
 
 ---
 
@@ -387,7 +391,7 @@ minutes would cost the GPU three times over. Blocks are stable, append-only and 
 
 **Each call:**
 
-- **Input:** the block's transcript lines with `(HH:MM:SS)` session timestamps, and the
+- **Input:** the block's transcript lines with their clock times, and the
   **previous block's notes** as context, so the model can tell a continuing topic from a
   new one. Not the whole session: the prompt must stay the same size at hour three as at
   minute five.
@@ -488,16 +492,18 @@ notes: those are terse, lossy and from the 3-bit model.
 *Duration: <h m>*
 
 ## <Topic>
-<what was discussed — short prose>
-**Conclusion:** <what was decided or agreed, with (HH:MM:SS)> | *Left open:* <what was not>
+<what was discussed, in paragraphs, ending with a sentence on how it ended:
+ "They agreed at around 2:34 PM to…", or that it was left open and what remained>
 
 ## <Topic>
 ...
 ```
 
-**Only topics.** No executive summary, no participants, no separate decisions or
-action-item list, no speaker attribution (operator's choice, 2026-11-11). Organise by
-theme, not in time order. Every topic ends with its conclusion or says it was left open.
+**Only topics, and only prose.** No executive summary, no participants, no separate
+decisions or action-item list, no speaker attribution. **No bullets, numbered lists,
+tables or bold labels** such as "Conclusion:" — sentences and paragraphs under one heading
+per topic (operator's choices, 2026-11-11). Organise by theme, not in time order. Every
+topic ends by saying how it concluded, or that it was left open.
 Base everything on the transcript, flag ambiguity, and never invent a decision. The
 machine-translation caveat from §9 applies.
 
@@ -606,20 +612,13 @@ Rules the prompt must carry:
 - Flag ambiguity and disagreement rather than smoothing it over.
 - The previous block's notes are context only. Do not repeat them. Say *"continued"* where a
   topic carries over.
-- **Terse.** This is read at a glance during a meeting. No preamble, no closing line.
+- **Plain and short.** Read at a glance during a meeting. No preamble, no closing line.
 
-Output shape:
-
-```
-**<one-line heading: the main topic of this block>**
-- point (HH:MM:SS)
-- point
-**Decided:** … (HH:MM:SS)        <- only if something was decided
-**Action:** owner — task (HH:MM:SS)   <- only if stated; "Unassigned" if no owner was named
-**Open:** …                       <- only if a question was left unanswered
-```
-
-At most ~8 lines. Empty sections are omitted, not written as "None".
+Output shape: **one to three short paragraphs of plain English, about 60–120 words** —
+what was discussed and what came of it (agreed, promised, left open). **No timestamps,
+no headings, no bullets, no bold labels.** Operator's choice, 2026-11-11, replacing an
+earlier bulleted format with timestamps: the note is read at a glance to catch up, and
+the transcript beside it already carries the times.
 
 ---
 
@@ -649,9 +648,12 @@ At most ~8 lines. Empty sections are omitted, not written as "None".
 
 ## 11. USER INTERFACE
 
-Single page, no framework, no bundler, no external assets. Calm and high-contrast, using the
-system font stack. It sits on a desktop monitor for hours, so it needs to be readable from a
-chair away and must not flicker.
+Single page, no framework, no bundler, no external assets. **Look: a deep ink-blue,
+teal and violet gradient with frosted-glass panes** (`backdrop-filter`), Segoe UI
+Variable (ships with Windows 11, so no web font), sentence-case labels — the operator
+asked for something sleeker than a stock Windows form (2026-11-11). The live transcript
+is the one loud element: large, light type. It sits on a desktop monitor for hours, so
+it must be readable from a chair away and must not flicker.
 
 **Top bar:**
 
@@ -661,13 +663,14 @@ chair away and must not flicker.
 3. **Start / Stop** button — one button, two states. Disabled while models load.
 4. **Status** — *Loading models…* / *Listening* / *Stopped* / an error sentence, plus elapsed
    session time.
-5. **Level meter** — a thin bar driven by §4's RMS. It is visible whenever a microphone is
-   selected, including before Start, so the user can check the mic first.
+5. **Level meter** — a glowing line along the top edge of the transcript pane, driven by
+   §4's RMS. It is live whenever a microphone is selected, including before Start, so the
+   user can check the mic first.
 6. **About** — version, repository, *Check for updates* (kept from the batch app).
 
 **Body: two columns.**
 
-- **Left, ~65%: transcript.** One line per utterance: `(HH:MM:SS) text`. It auto-scrolls
+- **Left, ~65%: transcript.** One line per utterance: `(2:34:05 PM) text`. It auto-scrolls
   while the user is at the bottom. If they scroll up, auto-scroll stops and a *Jump to live*
   button appears. New lines must not shift what the user is reading.
 - **Tabs on the transcript column: Transcript | Full Summary.** The Full Summary tab
@@ -711,8 +714,8 @@ naturally. Written by `history.py`:
 output\
   2026-11-11 1430\
     meeting.json      <- {"name", "started", "duration_s", "has_summary"} — rewritten atomically
-    transcript.md     <- "(HH:MM:SS) text" lines, appended as each utterance is recognised
-    notes.md          <- one "## HH:MM:SS–HH:MM:SS" section per block, appended as each lands
+    transcript.md     <- "(2:34:05 PM) text" lines, appended as each utterance is recognised
+    notes.md          <- one "## 2:30 – 2:35 PM" section per block, appended as each lands
     summary.md        <- written once by §7.1, if generated
 ```
 

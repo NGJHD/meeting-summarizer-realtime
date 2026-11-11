@@ -233,30 +233,9 @@ def _download(url: str, dest: Path, total_hint: int) -> None:
 # So the updater fetches them itself, after the payload and before the restart.
 # Each is optional by construction: the app runs without it, so a failure here
 # warns and carries on rather than abandoning an update that is otherwise fine.
-EXTRA_MODELS = (
-    {
-        "path": "models/wav2vec2-align.onnx",
-        # What the user loses without it, named once however many files it
-        # takes. Two files are one capability, and the notice should say so.
-        "component": "Word alignment",
-        "reason": "speaker attribution and summary quality are noticeably worse",
-        "min_size": 350_000_000,
-        "size_hint": 377_811_056,
-        "label": "word alignment model",
-        "url": "https://github.com/%s/releases/download/"
-               "align-wav2vec2-base-960h/wav2vec2-align.onnx" % version.GITHUB_REPO,
-    },
-    {
-        "path": "models/wav2vec2-align.json",
-        "component": "Word alignment",
-        "reason": "speaker attribution and summary quality are noticeably worse",
-        "min_size": 200,
-        "size_hint": 277,
-        "label": "word alignment labels",
-        "url": "https://github.com/%s/releases/download/"
-               "align-wav2vec2-base-960h/wav2vec2-align.json" % version.GITHUB_REPO,
-    },
-)
+# Optional models fetched automatically during an update. None yet: the batch
+# app's word-alignment model has no place in live transcription.
+EXTRA_MODELS: tuple = ()
 
 
 def offered_language_models() -> list:

@@ -1,0 +1,42 @@
+You are reading one section of a long meeting transcript and taking detailed working
+notes for a colleague who will later write the final summary. They will not have access
+to the transcript itself — only to your notes.
+
+This is part {{CHUNK_INDEX}} of {{CHUNK_TOTAL}}, covering {{TIME_START}} to {{TIME_END}}
+of the meeting.
+
+RULES
+- Base all factual content strictly on the transcript. Never infer decisions, numbers,
+  deadlines, or outcomes that were not stated.
+- There are no speaker labels and none are wanted. Do not try to work out who said what.
+- The transcript is machine-generated, and parts of it were spoken in Mandarin and
+  machine-translated to English. It contains recognition errors. If a term appears in
+  several inconsistent spellings, treat them as the same thing and use the most plausible
+  form. Do not comment on transcription or translation quality.
+- If something is ambiguous, contested, or left unresolved, flag it explicitly rather
+  than smoothing it over.
+- Preserve the times (written like 2:34 PM) against significant points.
+
+Be EXHAUSTIVE rather than concise. These notes are raw material, not a deliverable.
+Over-inclusion at this stage is cheap; anything you leave out is lost permanently and
+cannot be recovered by any later step. If in doubt, include it.
+
+Do not write an introduction, a conclusion, or any commentary about the transcript
+itself. Return only the three headings below, in this order, as Markdown.
+
+## Themes
+What was actually being discussed, in substance. Not topic labels — the content of the
+discussion. Include specific figures, names, systems, dates and commitments as stated.
+Where views differed, say what the different views were.
+
+## Outcomes
+Anything concluded, decided, agreed or explicitly deferred, each with the time it was
+said (like 2:34 PM). If nothing was concluded in this section, write "None in this section." Do not
+manufacture outcomes from discussion that merely trailed off.
+
+## Loose Ends
+Questions raised and not answered, actions mentioned without an owner, and anything left
+hanging at the end of this section.
+
+TRANSCRIPT
+{{TRANSCRIPT}}
