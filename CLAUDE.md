@@ -479,10 +479,11 @@ notes: those are terse, lossy and from the 3-bit model.
   `reduce.py` (map → group reduce when chunks exceed 8 → final reduce, recursive), with
   their context guards. Take them from `NGJHD/Meeting-Summarizer` at commit `1559ecf` and
   strip speakers, minutes mode and calibration.
-- **Map notes get 2,500 tokens, not the batch app's 1,500.** At 1,500 every map call hit
-  the cap and stopped mid-notes, losing its last headings — Outcomes and Loose Ends, the
-  decisions first; at 2,500 a 3h43m meeting's summary recorded half as many decisions
-  again (`BUILD_NOTES.md` §6).
+- **Map notes get up to 4,500 tokens, which in practice means no cut-off.** At the batch
+  app's original 1,500 every map call hit the cap and stopped mid-notes, losing its last
+  headings — Outcomes and Loose Ends, the decisions first. At 2,500 the longest notes still
+  stopped early. At 4,500 every note tested finished on its own (585–3,937 tokens), with no
+  added repetition or hedging (`BUILD_NOTES.md` §6). The batch app uses 4,500 too.
 - **Sampling as in the batch app:** map and group-reduce run with thinking off. The final
   reduce runs with thinking on, `reasoning_effort` medium, `--reasoning-budget 4000`,
   `max_tokens` 12000, and the thinking-off retry on an empty `length` finish.
@@ -855,7 +856,7 @@ All tunables live in `config.json`. **There is no settings screen.** The UI writ
     "ctx_size": 32768,
     "target_tokens": 10000,
     "overlap_tokens": 400,
-    "max_map_output_tokens": 2500,
+    "max_map_output_tokens": 4500,
     "group_reduce_threshold": 8,
     "group_size": 5,
     "max_group_output_tokens": 2500,

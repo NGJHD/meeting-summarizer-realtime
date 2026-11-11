@@ -384,8 +384,20 @@ and generation simply stops at the cap. So Outcomes -- the decisions -- were the
 casualty, which is what the decision count shows. In the batch app's own cache for a
 1h09m meeting, two of its three notes stopped inside Positions and Themes respectively, so
 Outcomes and Speaker Evidence never reached the final reduce for two-thirds of the
-meeting. **Default is now 2,500.** Every topic of substance was present at 1,500 too, so this restores detail
-and decisions rather than whole topics.
+meeting. Every topic of substance was present at 1,500 too, so the cap costs detail and
+decisions rather than whole topics.
+
+**Then 4,500, where the cap stops binding.** Re-running the batch app's summarising stage
+on two real meetings' transcripts (1h09m, 2h12m): at 2,500 the longest notes still stopped
+early; at 4,500 every note finished on its own, at 585-3,937 tokens -- the notes' natural
+length. No repeated sentences and no rise in hedging; the 2h12m summary recorded the most
+decisions of the three settings (32, against 26 at 2,500 and 18 at 1,500) and dropped a
+bulleted "open items" list that 2,500 had added. About 25 s more per meeting. One run each,
+so the counts carry sampling noise; completeness does not. Full table in the batch app's
+BUILD_NOTES 9ay. **Default is now 4,500** in both apps.
+
+Fuller notes mean the final prompt outgrows the 32k context from about six chunks
+(~4 hours), where `_fit_final` adds a consolidation tier -- a few minutes, by design.
 
 ### Incidental passes
 

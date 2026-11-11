@@ -118,7 +118,7 @@ def build_chunks(task: Task, server: llm.LlamaServer, lines: list[tuple[float, s
                  s: dict, meeting: history.Meeting) -> list[Chunk]:
     target = int(s.get("target_tokens", 10000))
     overlap = int(s.get("overlap_tokens", 400))
-    room = server.ctx_size - int(s.get("max_map_output_tokens", 2500)) - 2000 - PROMPT_ALLOWANCE
+    room = server.ctx_size - int(s.get("max_map_output_tokens", 4500)) - 2000 - PROMPT_ALLOWANCE
     if room < target:
         target = max(room, MIN_TARGET_TOKENS)
         overlap = min(overlap, max(target // 8, 1))
@@ -240,7 +240,7 @@ class SummaryJob:
 
     def _map(self, chunks: list[Chunk], s: dict, meeting: history.Meeting) -> list[str]:
         template = llm.load_prompt("summary_map")
-        max_out = int(s.get("max_map_output_tokens", 2500))
+        max_out = int(s.get("max_map_output_tokens", 4500))
         notes = []
         for c in chunks:
             self.task.check_cancelled()
