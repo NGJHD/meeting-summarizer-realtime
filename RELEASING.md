@@ -29,7 +29,7 @@ This writes two zips **beside the repository folder** (in its parent):
 | Asset | Contents | Used by |
 |---|---|---|
 | `Meeting-Transcriber-Live-vX.Y.Z.zip` | the tracked source files, under 1 MB | the in-app **Check for updates** button |
-| `Meeting-Transcriber-Live-vX.Y.Z-full.zip` | the same plus `runtime\`, `bin\` and the two voice detection models | a first install |
+| `Meeting-Transcriber-Live-vX.Y.Z-full.zip` | the same plus `runtime\`, `bin\` and the two voice detection models, minus files this app never uses (`make_release.unused`) | a first install |
 
 The full zip must stay under GitHub's 2 GB per-asset limit; the script stops if it does
 not. The speech and language models are never bundled — `DOWNLOAD_MODELS.bat` fetches them.
@@ -46,7 +46,9 @@ gh release create vX.Y.Z ^
   --title "vX.Y.Z" --notes-file <notes.md>
 ```
 
-The full zip is about 1.5 GB, so the upload takes a while.
+The full zip is about 1 GB, so the upload takes a while. If it fails part-way, GitHub keeps
+the release as a **draft**: upload the missing file with `gh release upload vX.Y.Z <zip>`
+and publish with `gh release edit vX.Y.Z --draft=false`.
 
 ## 4. Check
 
@@ -58,6 +60,5 @@ It asks GitHub what an installed copy would see: the tag matches the version, bo
 are attached, the updater picks the small one, and the Python runtime that
 `DOWNLOAD_MODELS.bat` fetches from the batch app's releases still exists.
 
-**While this repository is private, the check — and the in-app update button — cannot see
-the release**: both ask GitHub's API without signing in. That is expected until the
-repository is made public.
+Both this check and the in-app update button ask GitHub's API without signing in, so they
+only see releases while the repository is public (it has been since v1.0.0).

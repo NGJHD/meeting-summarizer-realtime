@@ -406,3 +406,31 @@ before it (15 s against 19.7 s). Counting from the last frame received fixed it.
 remaining ~1.7 s is the mic's own start-up, once at Start and once at the reconnect.
 
 A real unplug-and-replug with the hardware is still to be confirmed (`TESTING.md`).
+
+---
+
+## 8. What the release leaves out (2026-11-11)
+
+The runtime is the batch app's and the engine folders are whole upstream zips, so the
+first full zip (1.06 GB) carried ~96 MB this app never touches:
+
+| | size | why it was there |
+|---|---|---|
+| `sherpa_onnx` | 27.5 MB | the batch app's speaker detection |
+| `nvrtc64_120_0.dll`, `nvrtc-builtins64_124.dll` (whisper) | 47.8 MB | NVIDIA's runtime compiler, shipped in the upstream zip |
+| llama.cpp tool DLLs and `llama-tokenize.exe` | ~8 MB | bench, cli, quantize, perplexity... |
+| whisper.cpp extras (`whisper-cli.exe`, `SDL2.dll`, `llama.dll`, `parakeet.dll`) | ~5 MB | demos and the CLI |
+| `pip` | 6.3 MB | installer, never used at runtime |
+| ONNX Runtime `transformers`, `quantization`, `tools` | ~4 MB | model-conversion helpers |
+
+**Tested, not assumed.** With all of it moved out: live capture, the GPU and CPU whisper
+servers, block notes, and a full summary on IQ4_XS all ran. nvrtc was the risky one -- the
+5060 Ti needs its GPU code compiled on first use -- so whisper-server was started with
+`CUDA_CACHE_DISABLE=1` and no nvrtc: the cold compile took 61 s and the transcription was
+correct. The driver does that compile, not nvrtc.
+
+ONNX Runtime itself stays: it runs the Silero VAD (CLAUDE.md §5).
+
+`tools/make_release.py` (`unused()`) leaves these out of the full zip, and
+`DOWNLOAD_MODELS.bat` (`:trim`) deletes them after a download.
+

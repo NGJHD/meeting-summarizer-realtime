@@ -47,6 +47,36 @@ SKIP_PARTS = {"__pycache__"}
 EXCLUDE_PREFIXES = ("tools/",)
 
 
+def unused(rel: str) -> bool:
+    """Bundled files this app never touches, left out of the full zip (~96 MB).
+
+    The runtime is the batch app's and the engine folders are whole upstream zips,
+    so both carry what that app or the upstream demos needed. Removing them was
+    tested end to end -- live capture, both whisper servers, notes, and a full
+    summary -- and whisper's first-use GPU compile was run from cold without the
+    nvrtc DLLs: the driver does that compile, not nvrtc (BUILD_NOTES section 8).
+    """
+    name = rel.rsplit("/", 1)[-1].lower()
+    site = "runtime/Lib/site-packages/"
+    if rel.startswith(site):
+        pkg = rel[len(site):].split("/", 1)[0].lower()
+        if pkg.startswith(("pip", "sherpa_onnx")):           # installer; batch diarizer
+            return True
+        if rel.startswith(site + "onnxruntime/") and rel[len(site + "onnxruntime/"):].split(
+                "/", 1)[0] in ("transformers", "quantization", "tools"):
+            return True                                      # model-conversion helpers
+        return False
+    if rel.startswith("bin/whisper-cuda/"):
+        if name.endswith(".exe"):
+            return name != "whisper-server.exe"               # demos, tests, the CLI
+        return name in ("sdl2.dll", "llama.dll", "parakeet.dll") or name.startswith("nvrtc")
+    if rel.startswith("bin/llama-cuda/"):
+        if name.endswith(".exe"):
+            return name != "llama-server.exe"
+        return name.endswith("-impl.dll") and name != "llama-server-impl.dll"
+    return False
+
+
 def source_entries() -> list:
     """Every tracked file, so the zip matches the commit rather than the disk."""
     out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
@@ -71,7 +101,10 @@ def write(target: Path, extras: bool) -> None:
             for src in base.rglob("*"):
                 if not src.is_file() or SKIP_PARTS & set(src.parts):
                     continue
-                z.write(src, "%s/%s" % (PREFIX, src.relative_to(ROOT).as_posix()))
+                rel = src.relative_to(ROOT).as_posix()
+                if unused(rel):
+                    continue
+                z.write(src, "%s/%s" % (PREFIX, rel))
         for rel in BUNDLED_FILES:
             src = ROOT / rel
             if not src.is_file():

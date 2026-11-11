@@ -70,7 +70,9 @@ Marked **(shipped)** where the file is inside the `-full` zip rather than downlo
 
 `runtime/` is CPython **3.12.14** from
 [python-build-standalone](https://github.com/astral-sh/python-build-standalone), under the
-**PSF Licence**, assembled by the batch Meeting Summariser project and reused as is. Its own
+**PSF Licence**, assembled by the batch Meeting Summariser project. Packages this app does
+not use (pip, sherpa-onnx, ONNX Runtime's conversion tools) are left out of the release.
+Its own
 `runtime/LICENSE.txt` travels with it and covers CPython and the libraries CPython itself
 bundles.
 
@@ -78,13 +80,12 @@ Vendored packages, as each declares itself:
 
 | Package | Licence |
 |---|---|
-| fastapi, pydantic, pydantic_core, anyio, h11, annotated_types, annotated_doc, typing_inspection, pip | MIT |
+| fastapi, pydantic, pydantic_core, anyio, h11, annotated_types, annotated_doc, typing_inspection | MIT |
 | onnxruntime | MIT |
 | starlette, uvicorn, click, idna | BSD-3-Clause |
 | numpy | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 |
 | packaging | Apache-2.0 OR BSD-2-Clause |
 | python_multipart, flatbuffers | Apache-2.0 |
-| sherpa_onnx, sherpa_onnx_core (present in the shared runtime, not used by this app) | Apache-2.0 |
 | protobuf | BSD-3-Clause |
 | typing_extensions | PSF-2.0 |
 

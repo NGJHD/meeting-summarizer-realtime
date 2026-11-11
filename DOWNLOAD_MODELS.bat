@@ -104,6 +104,13 @@ call :getbin "" "cudart64_12.dll" 380000000 ^
   "%GH%/llama.cpp/releases/download/%LLAMA_BUILD%/cudart-llama-bin-win-cuda-12.4-x64.zip" ^
   "NVIDIA CUDA runtime - 391 MB"
 
+rem  The runtime is the batch app's and the engine zips are whole upstream
+rem  releases, so they carry ~96 MB this app never touches: a package installer,
+rem  the batch app's speaker detection, upstream demo programs and an unused
+rem  compiler library. The same list tools\make_release.py leaves out of the
+rem  full zip (BUILD_NOTES section 8). Deleting them is safe and optional.
+call :trim
+
 echo.
 echo   ---------------------------------------------
 if defined FAILED (
@@ -116,6 +123,23 @@ if defined FAILED (
 )
 echo.
 pause
+exit /b 0
+
+rem ---------------------------------------------------------------------------
+:trim
+set "SP=runtime\Lib\site-packages"
+for /d %%D in ("%SP%\pip" "%SP%\pip-*" "%SP%\sherpa_onnx" "%SP%\sherpa_onnx-*" "%SP%\sherpa_onnx_core-*" "%SP%\onnxruntime\transformers" "%SP%\onnxruntime\quantization" "%SP%\onnxruntime\tools") do (
+  if exist "%%~D" rmdir /S /Q "%%~D" 2>nul
+)
+if exist "bin\whisper-cuda\whisper-server.exe" (
+  for %%F in ("bin\whisper-cuda\*.exe") do if /I not "%%~nxF"=="whisper-server.exe" del /Q "%%~F" 2>nul
+  for %%F in (SDL2.dll llama.dll parakeet.dll) do if exist "bin\whisper-cuda\%%F" del /Q "bin\whisper-cuda\%%F" 2>nul
+  del /Q "bin\whisper-cuda\nvrtc*.dll" 2>nul
+)
+if exist "bin\llama-cuda\llama-server.exe" (
+  for %%F in ("bin\llama-cuda\*.exe") do if /I not "%%~nxF"=="llama-server.exe" del /Q "%%~F" 2>nul
+  for %%F in ("bin\llama-cuda\*-impl.dll") do if /I not "%%~nxF"=="llama-server-impl.dll" del /Q "%%~F" 2>nul
+)
 exit /b 0
 
 rem ---------------------------------------------------------------------------
