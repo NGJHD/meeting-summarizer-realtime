@@ -131,3 +131,76 @@ Consequences for the app:
 - A real 300 s block cadence over 3 hours (§16 test 7) — memory growth and drift.
 - IQ3_XXS vs IQ4_XS note quality on these blocks. Both runs' notes exist locally and
   were not compared.
+
+---
+
+## 3. Live microphone (2026-11-11)
+
+**Device:** a USB mic, `Microphone (BOYA CM30)` — the only dshow audio device. Its USB
+instance path is `USB\VID_4D43&PID_3033&MI_00\9&3A2E8903&0&0000`. The `9&…&0&0000` form is
+Windows-generated and port-derived: **the device has no serial number**. On another port it
+gets a new instance and a new endpoint GUID (the dshow alternative name
+`@device_cm_{…}\wave_{96CBD551-…}`), and often a renamed friendly name such as
+`Microphone (2- BOYA CM30)`. CLAUDE.md §4 matches on the friendly name with that prefix
+stripped, and never stores the GUID.
+
+The mic also exposes a playback endpoint, `Speakers (BOYA CM30)` (its headphone jack).
+Windows did **not** make it the default output; the default stayed
+`Speakers (High Definition Audio Device)`.
+
+**dshow capture works as specified:** `-f dshow -audio_buffer_size 50 -i audio="<name>"
+-ac 1 -ar 16000 -f s16le pipe:1`, with no stderr output.
+
+**Level check** (meeting audio from the room speaker, mic beside it, Windows mic level
+100%):
+
+| | RMS | dBFS |
+|---|---|---|
+| room, silent | 62 | −54.5 |
+| room, playback | 245 | −42.5 (peak 3,432) |
+| signal over silence | | **12 dB** |
+
+The first attempt measured 1.3 dB: the default speaker was muted in Windows. It was
+unmuted by request.
+
+### Live vs replay — timing
+
+10 minutes, same stretch as §2, real 300 s block cadence, IQ3_XXS + MTP, one GPU.
+
+| | replay | live mic |
+|---|---|---|
+| utterances | 89 | 83 |
+| latency median / worst | 1.1 / 3.1 s | **1.1 / 2.2 s** |
+| peak VRAM (5060 Ti) | 14,755 MiB | 14,746 MiB |
+| CJK characters in output | 0 | 0 |
+
+**Capture adds no latency.** Whisper's warm-up took **61.8 s** again on the first launch
+in 11 days: the driver's JIT cache does not persist reliably, so the warm-up (§8) can be
+needed on any launch, not only a machine's first.
+
+### Transcript quality — short utterances are the problem
+
+No ground truth exists for this audio. The reference is **batch-style `whisper-cli`**
+over the same 10 minutes (one call, whisper's own 30 s windows, `--vad`) — the method the
+operator is satisfied with in the batch app. Word error rate against that reference:
+
+| method | WER vs batch reference | utterances | median length |
+|---|---|---|---|
+| live mic, 0.6 s silence / 15 s cut | 68.1% | 83 | 3.2 s |
+| replay, 0.6 s / 15 s | 55.1% | 89 | 3.8 s |
+| replay, 0.6 s / 15 s + context carry | 54.3% | 89 | 3.8 s |
+| replay, 1.0 s / 15 s + carry | 53.0% | 65 | 4.8 s |
+| replay, 1.0 s / 30 s + carry | 50.0% | 57 | 5.4 s |
+| **batch `whisper-cli` per 5-minute block** | **21.1%** | — | 300 s |
+
+- The audio is hard: mixed-language, overlapping speech. Translations of the Mandarin
+  vary between any two passes, so part of every WER here is wording, not loss.
+- **Utterance-sized pieces are the main loss** (~55%), and the room acoustics add ~13
+  points on top (68%). Tuning the segmenter recovers 5 points at most.
+- **Transcribing a whole 5-minute block at once comes within 21%** of the reference.
+  It took 10.0 s per block with `whisper-cli`, including the model load that a resident
+  `whisper-server` avoids.
+- Hallucinated fillers ("Thank you.") appear in the live output, as §6 expected.
+
+This points at a second pass: re-transcribe each finished block batch-style, from audio
+held in memory only. Proposed to the operator; not yet in the spec.

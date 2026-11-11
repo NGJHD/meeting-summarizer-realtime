@@ -2,7 +2,9 @@
 
 You are building a **fully offline Windows desktop application** that listens to a
 microphone in a meeting room, shows a live English transcript as people speak, and keeps a
-column of short notes summarising each completed 5-minute block of the meeting.
+column of short notes summarising each completed 5-minute block of the meeting. Every
+meeting is kept, as text, in a history sidebar (§11.1). One button stops listening and
+writes a full summary of the meeting (§7.1).
 
 This repository began as a copy of the batch app at
 `https://github.com/NGJHD/Meeting-Summarizer` (a recording goes in, minutes come out). About
@@ -38,9 +40,14 @@ everything measured in this one.
    goal.
 5. **One user, one room, one microphone.** No accounts, no network viewers, no multiple
    sessions at once.
-6. **Nothing is written to disk.** No audio, no transcript, no notes. The session lives in
-   server memory and is gone when the app closes. This is a requirement, not an
-   optimisation — see §10.
+6. **Text only, never audio.** Every meeting's transcript and 5-minute notes are saved
+   automatically, **as they happen**, in the app's own `output\` folder (§11.1). So is its
+   full summary, if one is generated, and a copy of the summary goes wherever the user
+   picks in a Save dialog (§7.1). **Audio is never written to disk**, not even
+   temporarily. See §10.
+
+   (History of this rule: the first version of this spec wrote nothing at all. The
+   operator changed it on 2026-11-11 to keep a history.)
 
 ### Scope
 
@@ -53,7 +60,10 @@ everything measured in this one.
   accepted. **Do not "fix" it** by switching to language auto-detection or a Chinese-capable
   recogniser: that would produce Chinese characters, which is not what is wanted.
 - **No speaker labels.** No diarization, live or afterwards.
-- **No document at the end.** No minutes, no summary of the whole meeting, no export.
+- **One generated document, on request only:** a full summary covering *what was
+  discussed and what was concluded*, by topic, with no speaker attribution (§7.1). It can
+  be generated at the end of a meeting or later, from a past meeting in the history. No
+  minutes, no action-item list, no other export.
 - **Recording length: up to about 3 hours of continuous listening.** Nothing may assume a
   length: not buffer sizes, not list growth, not the number of blocks. Memory must stay
   flat over a long session apart from the transcript text itself.
@@ -144,6 +154,7 @@ MeetingTranscriber\
     Qwen3.8-27B-UD-IQ4_XS.gguf          <- optional; only where it fits beside whisper
   prompts\
     block.txt
+    summary_map.txt  summary_group.txt  summary_final.txt
   web\
     index.html  app.js  style.css
   server\
@@ -154,11 +165,15 @@ MeetingTranscriber\
     vad.py            <- silero under onnxruntime → utterances               (new)
     asr.py            <- whisper-server lifecycle + client                   (new)
     notes.py          <- the 5-minute block loop                             (new)
+    summary.py        <- Generate Full Summary: save dialog, model swap, files (new)
+    history.py        <- output\ meeting folders: append, list, rename, delete (new)
+    chunker.py reduce.py <- restored from the batch app, speakers stripped (§7.1)
     llm.py            <- llama-server lifecycle + chat calls       (kept, mostly as is)
     hardware.py       <- NVIDIA detection, VRAM, model choice     (kept, cut down)
     config.py         <- config load/merge/write                  (kept, new schema)
     open_browser.py   version.py   updater.py                     (kept)
   temp\               <- job.log and the running lock only. Never transcript content.
+  output\             <- one folder per meeting: transcript, notes, summary (§11.1)
 ```
 
 `server/audio.py` (the batch ffmpeg converter) survives only as a source of patterns for
@@ -183,8 +198,28 @@ bin\ffmpeg.exe -hide_banner -loglevel error ^
 - **Device choice.** List devices with `-list_devices true -f dshow -i dummy` and parse
   stderr for audio devices. dshow has no "default device" alias, so the UI shows a
   microphone dropdown (§11). The choice is remembered in `capture.device` (by name), the
-  same way the batch app remembered the Port box. If the remembered device has gone, fall
-  back to the first audio device and say so.
+  same way the batch app remembered the Port box. Re-enumerate every time the dropdown is
+  opened and at every Start, never once at startup: the mic may be plugged in after the
+  app has started.
+- **The same mic on another USB port is a different device to Windows.** A USB mic with
+  no serial number (the operator's has none — its instance path is port-derived) gets a
+  new device instance on each port, with a new endpoint GUID. Windows also often renames
+  the second instance, e.g. `Microphone (2- BOYA CM30)`. So:
+  - **Never store the GUID** (dshow's `@device_cm_…\wave_{…}` alternative name). Store
+    the friendly name.
+  - **Match in this order:**
+    1. the exact remembered name;
+    2. the same name with Windows' instance prefix removed — `(\d+- )` just inside the
+       parenthesis — compared case-insensitively, if exactly one present device matches;
+    3. the Windows default recording device;
+    4. the first audio device.
+
+    Steps 1–2 are silent. When step 2 matches, update `capture.device` to the current
+    name. Steps 3–4 show *"Couldn't find "<remembered>". Using "<chosen>" — change it
+    above if that's wrong."*, and do not overwrite the remembered name until the user
+    picks one.
+  - With no audio device at all: Start is disabled and the status says *"No microphone
+    found. Plug one in."*
 - **Level meter.** Compute RMS per block and publish at ~5 Hz. This is the user's only way
   to know the right microphone is selected and actually hearing the room, before anything
   has been transcribed.
@@ -289,9 +324,11 @@ to read the transcript.
 
 **Blocks, not a sliding window.** Every 5 minutes of session time (`notes.block_s`, 300),
 the utterances whose *start* falls in that block are summarised **once**, and the result
-never changes. The column shows the newest blocks at the top. The **last three are
-expanded** — that is the "last 15 minutes". Older blocks collapse to their one-line heading
-and stay scrollable for the rest of the session.
+never changes. **Every block stays on screen, fully expanded, for the whole session.** Each
+new block is **appended at the bottom**, and the column auto-scrolls with the same rule as
+the transcript (§11). Nothing is ever collapsed or removed until the next Start. This was
+the operator's explicit choice (2026-11-11), replacing an earlier newest-on-top design that
+collapsed older blocks.
 
 Why not re-summarise the last 15 minutes every minute: the notes would rewrite themselves
 on every refresh, bullet points would reshuffle under the reader's eyes, and the same 15
@@ -326,6 +363,104 @@ minutes would cost the GPU three times over. Blocks are stable, append-only and 
 - **Pending state:** while a block is waiting or generating, show it as a placeholder with
   its time range, and in the column header show *"Next notes at 00:15:00"*.
 
+### 7.1 Generate Full Summary
+
+A button **below the transcript column**, labelled **Generate Full Summary**, with an ⓘ
+info tooltip beside it: *"Stops listening and writes a summary of the whole meeting — the
+topics discussed and what was concluded on each. It's kept with this meeting in the
+history, and you can save a copy anywhere. Takes several minutes for a long meeting.
+Listening can't be resumed afterwards."* (For a past meeting, the tooltip omits the
+listening sentences.)
+
+It is shown on the live meeting, and on any past meeting that has no summary yet, when the
+transcript has at least `notes.min_words` words. Once a summary exists, the button is
+replaced by the **Full Summary** tab (§11).
+
+**On the live meeting, this ends the meeting.** It is final: no resuming, no appending.
+The next Start begins a new, empty session.
+
+**Flow — the user can back out until a location is chosen:**
+
+1. **Confirm** — an in-page modal, not a browser `confirm()`: *"This will stop listening
+   and generate a full summary of the meeting so far. It can take several minutes, and
+   listening can't be resumed. Continue?"* — **Cancel** / **Continue**. Cancel changes
+   nothing.
+2. **Save dialog** — a native Windows *Save As* dialog for the **copy**, opened **by the
+   server** (a PowerShell `System.Windows.Forms.SaveFileDialog`, owned by a hidden `TopMost`
+   form so it appears in front of the browser). Filter `Markdown (*.md)`. Defaults: the
+   user's **Desktop** folder, and the file name `<meeting name> - summary.md`. Overwrite
+   prompt on. Cancel here also changes nothing, and listening continues.
+
+   Why the server, not the browser: the summary takes minutes. A server-side path is
+   still written if the tab is closed meanwhile. A browser-side handle
+   (`showSaveFilePicker`) is lost with the tab. Verify the dialog actually comes to the
+   front on Windows 11; a dialog hidden behind the browser looks like a hang.
+3. **From here it is final.**
+   - Live meeting only: stop capture, flush the open utterance through whisper, and
+     abandon any pending 5-minute block. The transcript is already on disk (§11.1).
+   - Unload whisper and the realtime llama-server.
+   - Start llama-server for the summary (below) and run the summary.
+   - Write `summary.md` into the meeting's history folder, then write the copy to the
+     chosen path.
+   - The **Full Summary** tab opens, showing the summary, with **Open file** (the copy)
+     and **Open folder** buttons.
+
+**Files.** The summary is written in two places: the meeting's history folder (the
+record) and the user's chosen path (the copy). **No transcript is written beside the
+copy**: the transcript lives in the history. The 5-minute notes stay in the history only.
+If writing the copy fails (for example, the folder has gone), keep the history copy and say
+*"Saved in the history, but not to <path>."*
+
+**How the summary is made — the full transcript, High Quality.** Not from the 5-minute
+notes: those are terse, lossy and from the 3-bit model.
+
+- Once whisper is unloaded, the whole card is free, so the summary runs on **High Quality
+  (`UD-IQ4_XS`) at `ctx_size` 32768 with MTP**. On a 16 GB card it fits whole (measured in
+  the batch app). If IQ4_XS is absent, use IQ3_XXS and say so in the log. With Port, use
+  the external server and load nothing.
+- **The batch app's tested path, restored rather than reinvented.** Its `chunker.py`
+  (`/tokenize`-based, ~10k-token chunks on utterance boundaries, 400-token overlap) and
+  `reduce.py` (map → group reduce when chunks exceed 8 → final reduce, recursive), with
+  their context guards. Take them from `NGJHD/Meeting-Summarizer` at commit `1559ecf` and
+  strip speakers, minutes mode and calibration.
+- **Sampling as in the batch app:** map and group-reduce run with thinking off. The final
+  reduce runs with thinking on, `reasoning_effort` medium, `--reasoning-budget 4000`,
+  `max_tokens` 12000, and the thinking-off retry on an empty `length` finish.
+- **Prompts:** `prompts/summary_map.txt`, `summary_group.txt` and `summary_final.txt`,
+  adapted from the batch app's with all speaker-label rules removed. The map notes keep
+  **Themes**, **Outcomes** and **Loose Ends** only.
+
+**The document:**
+
+```
+# Meeting summary — <YYYY-MM-DD HH:MM>
+*Duration: <h m>*
+
+## <Topic>
+<what was discussed — short prose>
+**Conclusion:** <what was decided or agreed, with (HH:MM:SS)> | *Left open:* <what was not>
+
+## <Topic>
+...
+```
+
+**Only topics.** No executive summary, no participants, no separate decisions or
+action-item list, no speaker attribution (operator's choice, 2026-11-11). Organise by
+theme, not in time order. Every topic ends with its conclusion or says it was left open.
+Base everything on the transcript, flag ambiguity, and never invent a decision. The
+machine-translation caveat from §9 applies.
+
+**Progress.** A full-width panel replaces the Start/Stop controls. It shows:
+*"Saving transcript…"* → *"Loading the High Quality model (up to 2 minutes)…"* →
+*"Reading the meeting: part i of N"* → *"Writing the summary…"*. Use the batch app's
+asymptotic per-call progress (`1 − e^(−elapsed/expected)`), not `tokens/max_tokens`.
+
+**Cancel** is available throughout. It aborts the LLM work and unloads the model. The
+meeting stays in the history with its transcript and notes, the button is enabled again
+(it now works as for a past meeting), and Start stays available for a new meeting. Failure
+behaves like Cancel, plus *"The summary couldn't be written. The meeting's transcript is
+safe in the history."*
+
 ---
 
 ## 8. THE LLM AND VRAM
@@ -347,7 +482,8 @@ over largely unchanged. What changes is sizing.
   costs about 2.4× in generation speed.
 - **Known trade-off:** below 4 bits, models start mangling proper nouns and digits. For
   glanceable notes over a transcript that is already partly a translation, that is
-  accepted. The full-meeting summary that would need 4-bit is out of scope here.
+  accepted. The full summary (§7.1) does need 4-bit, and gets it: whisper is unloaded by
+  then, so IQ4_XS has the whole card.
 
 **`hardware.py` must account for whisper.** Add a measured `WHISPER_RESERVE_GIB` and
 subtract it from VRAM before `choose_key`, `offload_regex` and the decision on whether
@@ -436,17 +572,21 @@ At most ~8 lines. Empty sections are omitted, not written as "None".
 
 ---
 
-## 10. PRIVACY — NOTHING ON DISK
+## 10. PRIVACY — TEXT IN ONE PLACE, AUDIO NOWHERE
 
 - **Audio** goes from the pipe into memory and is released once its utterance has been
-  recognised. The VAD keeps at most `max_utterance_s` plus padding.
-- **Transcript and notes** live in the session object in server memory only. A browser
-  reload re-fetches them from the server (§11). Closing the console window ends them.
+  recognised. The VAD keeps at most `max_utterance_s` plus padding. **Audio never touches
+  disk**, not even in `temp\`.
+- **Meeting text lives in exactly two places:** the meeting's folder under `output\`
+  (§11.1), and the summary copy at the path the user chose (§7.1). Nowhere else.
 - **`temp\job.log`** records timings, queue depths, token counts, latencies, drop counts
   and errors. **Never transcript text, never note text, never prompt or response bodies.**
-  The batch app could log freely because its output was saved anyway; here, the log would
-  be the only copy of something the user chose not to keep.
+  A log is not where the user looks for, or deletes, meeting content. Deleting a meeting
+  from the history must actually delete it, and a copy left in a log would defeat that.
 - Diagnostic info copied by the user follows the same rule.
+- Nothing is written to `temp\` during a full summary: chunks, map notes and prompts stay
+  in memory. The §17 rule against writing under `%USERPROFILE%` covers the app's own state.
+  It does not cover a file the user explicitly saves to their Desktop.
 - **Never put anything from a real meeting into anything published** — commit messages,
   release notes, `BUILD_NOTES.md`, prompts, code comments or test fixtures. That means names
   of people, organisations, products, systems, projects and sites; acronyms; figures; quoted
@@ -479,14 +619,64 @@ chair away and must not flicker.
 - **Left, ~65%: transcript.** One line per utterance: `(HH:MM:SS) text`. It auto-scrolls
   while the user is at the bottom. If they scroll up, auto-scroll stops and a *Jump to live*
   button appears. New lines must not shift what the user is reading.
-- **Right, ~35%: notes.** Blocks as in §7, newest at the top, last three expanded, the
-  pending block shown as a placeholder.
+- **Tabs on the transcript column: Transcript | Full Summary.** The Full Summary tab
+  exists only once a summary has been generated for the meeting on screen, and shows it
+  rendered. Without one, **Generate Full Summary** with its ⓘ tooltip (§7.1) sits below
+  the transcript.
+- **Right, ~35%: notes.** Blocks as in §7: appended at the bottom, all expanded, never
+  removed. The pending block is shown as a placeholder at the bottom. Auto-scroll and
+  *Jump to live* work as in the transcript column.
 
-**After Stop** both columns stay on screen until the next Start or until the app closes.
-There is no save or export button (§0.6).
+**After Stop, and after a full summary,** the meeting stays on screen until the next
+Start, or until another meeting is picked from the history. There is no other save or
+export (§0.6).
+
+### 11.1 History sidebar
+
+A collapsible sidebar on the **left**, listing every meeting in `output\`, newest first.
+
+- **Entry label:** the meeting's name, which defaults to its start time, plus its
+  duration — e.g. *"11 Nov 2026, 14:30 · 1h 52m"*. A ✓ marks meetings that have a full
+  summary. The live meeting sits at the top with a ● and a running duration.
+- **Clicking an entry** loads that meeting's transcript, notes and (if any) full summary
+  into the two columns, **read-only**.
+- **Rename** (pencil icon, inline edit) changes the display name only. The folder name
+  never changes, so nothing can break by renaming.
+- **Delete** (bin icon) asks in-page *"Delete this meeting's transcript, notes and summary?
+  This can't be undone."* and removes the folder. The live meeting cannot be deleted.
+- **Browsing while live is allowed.** Listening, transcription and notes carry on in the
+  background, and a bar across the top reads **"● Live — back to meeting"**. Clicking the
+  live entry or the bar returns to it. Start/Stop always act on the live meeting, never on
+  the one being viewed.
+- **Short sessions are not kept.** At Stop, a meeting with fewer than `notes.min_words`
+  transcribed words has its folder removed and never appears in the list, so a quick mic
+  check leaves nothing behind.
+- **No automatic clean-up.** It is text; a year of daily meetings is a few tens of MB.
+
+**On disk** — one folder per meeting, named from the start time so it is unique and sorts
+naturally. Written by `history.py`:
+
+```
+output\
+  2026-11-11 1430\
+    meeting.json      <- {"name", "started", "duration_s", "has_summary"} — rewritten atomically
+    transcript.md     <- "(HH:MM:SS) text" lines, appended as each utterance is recognised
+    notes.md          <- one "## HH:MM:SS–HH:MM:SS" section per block, appended as each lands
+    summary.md        <- written once by §7.1, if generated
+```
+
+- **Append as it happens**, and flush after every write. A crash, a power cut or a closed
+  console loses at most the utterance in flight. Nothing is held back until Stop.
+- **`meeting.json`** is rewritten via `config.write_atomic` (temp file + replace) on each
+  block and at Stop, so a crash never leaves it half-written. The sidebar reads
+  `meeting.json` and falls back to the folder name if the file is missing or corrupt.
+- **A meeting interrupted by a crash** is found at startup with no clean Stop. Fix up its
+  duration from the last transcript line and list it normally. The partial block at the
+  crash is never summarised.
+- **Folder name collision** (two Starts within the same minute): append ` (2)`.
 
 **Transport: Server-Sent Events** on `GET /api/events`. Event types: `status`, `level`,
-`utterance`, `block_pending`, `block`, `error`. `GET /api/session` returns the full current
+`utterance`, `block_pending`, `block`, `summary_progress`, `summary_done`, `error`. `GET /api/session` returns the full current
 state.
 
 **Reattaching.** On load the page fetches `/api/session`, renders everything, then attaches
@@ -526,9 +716,10 @@ running.
 These carry batch-app concepts that no longer exist. Remove them as each file is brought up,
 and do not port them:
 
-- **`main.py`:** upload, start-job, history, speakers/rename, rebuild, mode routes,
+- **`main.py`:** upload, start-job, speakers/rename, rebuild, mode routes,
   `estimate_minutes`, disk-space checks. Keep `/`, static files, models, about, update,
-  health and the SSE plumbing.
+  health and the SSE plumbing. The batch `history` and `history/open` routes are a starting
+  point for §11.1's list and open, but the meeting folder format is new.
 - **`jobs.py`:** the staged `Job` with its stage weights, percentages and ETA. Keep process
   tracking, the job log, `clean_temp`, `shutdown_all` and the Job Object code. Session state
   moves to `session.py`.
@@ -536,8 +727,8 @@ and do not port them:
   workaround, the CPU backend and `LEGACY_MODELS`. Keep `nvidia-smi` detection, the model
   table, `model_gib`, `offload_regex` and `choose_key`, and add the whisper reserve (§8).
 - **`config.py`:** `REQUIRED_FILES`, `_DEFAULTS` and the backend-per-engine paths, all
-  rewritten for §14's schema. `meeting_dir`, `migrate_flat_output` and the `ui.mode`
-  helpers go. `load_config` must keep merging new keys from `_DEFAULTS`, so an old
+  rewritten for §14's schema. `migrate_flat_output` and the `ui.mode` helpers go.
+  `meeting_dir` and `write_atomic` stay for §11.1. `load_config` must keep merging new keys from `_DEFAULTS`, so an old
   `config.json` loses nothing.
 - **`llm.py`:** `loading_message` and anything that reads `job.stage`. The rest stays.
 - **`version.py`:** already pointed at this repo. `EXPECTED_FILES` must list files that
@@ -546,7 +737,7 @@ and do not port them:
 - **`web/`:** `app.js` is mostly rewritten. Keep the SSE reconnect logic, the About overlay
   and the update flow. `style.css` largely carries.
 - **`run.bat`:** preflight for this file set (whisper-server, silero_vad.onnx, at least one
-  GGUF unless Port is on). Drop `output\`.
+  GGUF unless Port is on). Keep creating `output\`.
 - **`DOWNLOAD_MODELS.bat`:** drop the diarization models, the alignment model, the Vulkan and
   CPU binaries and the ggml silero. Add `silero_vad.onnx`, pinned to a release tag of
   `snakers4/silero-vad`, never a branch head. Keep IQ4_XS as optional.
@@ -590,6 +781,19 @@ All tunables live in `config.json`. **There is no settings screen.** The UI writ
     "min_words": 40,
     "max_tokens": 600
   },
+  "summary": {
+    "model": "iq4_xs",
+    "ctx_size": 32768,
+    "target_tokens": 10000,
+    "overlap_tokens": 400,
+    "max_map_output_tokens": 1500,
+    "group_reduce_threshold": 8,
+    "group_size": 5,
+    "max_group_output_tokens": 2500,
+    "final_thinking": true,
+    "final_effort": "medium",
+    "final_budget_tokens": 4000
+  },
   "llm": {
     "model": "auto",
     "ctx_size": 8192,
@@ -629,6 +833,9 @@ Confirm each step before moving on.
 5. **VAD + whisper → transcript column** — live, with the hallucination filter.
 6. **Block notes → notes column.**
 7. **Stop, reattach, idle unload, shutdown, kill-on-close.**
+7a. **Generate Full Summary** (§7.1): confirm modal, server-side Save dialog, transcript
+    file, model swap, restored chunker/reduce, summary file, Cancel. Verify the three-tier
+    path by lowering `summary.group_reduce_threshold` to 2 on a short replay.
 8. **Long-session test** — 3 hours of replay. Memory, latency and block timing at hour three
    match hour one.
 9. **Packaging** — `run.bat`, `DOWNLOAD_MODELS.bat`, notices, release scripts, README.
@@ -661,8 +868,27 @@ Confirm each step before moving on.
 11. **Force-quit the console:** no `ffmpeg.exe`, `whisper-server.exe` or `llama-server.exe`
     remains in Task Manager.
 12. **Network adapter disabled:** a full session runs.
-13. **Nothing on disk:** after a session, nothing under the app folder contains a word of
-    the transcript — `temp\job.log` included. Grep for a distinctive word you said.
+13. **Text in one place:** after a session, a distinctive word you said appears only under
+    that meeting's `output\` folder (and in the summary copy, if made). Grep the whole app
+    folder for it, `temp\job.log` included. No audio file exists anywhere.
+16. **Full summary:** on a 1-hour replay, Generate Full Summary → confirm → Save writes the
+    copy to the Desktop with the default name and `summary.md` into the history folder. No
+    transcript is written beside the copy. The summary contains only topic sections, each
+    ending in a conclusion or "left open", and no speaker labels. Cancelling at the modal or
+    at the Save dialog leaves listening running.
+17. **Full summary, cancelled midway:** no summary file is written anywhere, no
+    `llama-server.exe` remains, the meeting is in the history with its transcript, and
+    Start begins a new session.
+18. **Save dialog in front:** the dialog appears above the browser window, not behind it.
+19. **History:** a finished meeting appears in the sidebar. Clicking it shows its
+    transcript, its notes and (if generated) a Full Summary tab. Rename survives a restart.
+    Delete removes the folder.
+20. **Crash safety:** kill the console 20 minutes into a replay. On restart the meeting is
+    in the history with every utterance up to the kill.
+21. **Browse while live:** open a past meeting mid-session. Transcription continues, the
+    live bar shows, and going back shows every line spoken meanwhile.
+22. **Summary from the past:** a past meeting with no summary gets one, and the ✓ appears.
+23. **Mic check leaves nothing:** Start, say two words, Stop. No new history entry.
 14. **Port:** with an external llama-server, notes are written by it and it is never killed.
     If it leaves no room for whisper, a plain message appears, not a hang.
 15. **Portable:** copy the folder to another drive letter and it runs unchanged.
@@ -671,9 +897,12 @@ Confirm each step before moving on.
 
 ## 17. THINGS NOT TO DO
 
-- Do not write audio, transcript or notes to disk, and do not add export or save. (If
-  that is wanted later, it is a deliberate change to §0, not a convenience.)
-- Do not add diarization, speaker labels, or a whole-meeting summary.
+- Do not write audio to disk, ever.
+- Do not write meeting text anywhere except the meeting's `output\` folder and the summary
+  copy the user chose (§10). Do not add any other export or save.
+- Do not hold transcript or notes back until Stop. Append as they happen (§11.1).
+- Do not add diarization or speaker labels, not even in the full summary.
+- Do not let Generate Full Summary resume listening afterwards. It ends the meeting.
 - Do not switch recognition to language auto-detection or a Chinese-output model (§0
   scope).
 - Do not re-summarise a sliding window. Blocks are summarised once (§7).

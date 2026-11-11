@@ -255,6 +255,13 @@ def main() -> int:
     ap.add_argument("--carry", action="store_true", help="pass recent text as prompt")
     ap.add_argument("--out", required=True)
     ap.add_argument("--label", default="run")
+    ap.add_argument("--min-silence-ms", type=int, default=600)
+    ap.add_argument("--max-utterance-s", type=float, default=15.0)
+    ap.add_argument("--fast", action="store_true", help="replay faster than real time (quality runs)")
+    ap.add_argument("--no-llm", action="store_true", help="skip block summaries")
+    ap.add_argument("--device", default="", help="dshow mic name; '' replays --audio")
+    ap.add_argument("--play", action="store_true",
+                    help="with --device: play --audio out of the default speaker")
     a = ap.parse_args()
 
     out = Path(a.out)
@@ -307,7 +314,7 @@ def main() -> int:
 
         template = (ROOT / "prompts" / "block.txt").read_text(encoding="utf-8")
         vad = Silero(MODELS / "silero_vad.onnx")
-        seg = Segmenter()
+        seg = Segmenter(min_silence_ms=a.min_silence_ms, max_utterance_s=a.max_utterance_s)
         utt_q: "queue.Queue" = queue.Queue()
         block_q: "queue.Queue" = queue.Queue()
         llm_busy = threading.Event()
@@ -388,11 +395,28 @@ def main() -> int:
         ta.start()
         tn.start()
 
+        if a.device:
+            # Live microphone. With --play, the same stretch of --audio goes out of
+            # the default speaker so the mic hears a known meeting.
+            src = ["-f", "dshow", "-audio_buffer_size", "50", "-i", "audio=" + a.device,
+                   "-t", str(a.minutes * 60)]
+        else:
+            src = ["-ss", str(a.start), "-t", str(a.minutes * 60)] + ([] if a.fast else ["-re"]) + ["-i", a.audio]
+        player = None
+        if a.device and a.play:
+            clip = out / ("%s-play.wav" % a.label)
+            subprocess.run([str(BIN / "ffmpeg.exe"), "-y", "-hide_banner", "-loglevel", "error",
+                            "-ss", str(a.start), "-t", str(a.minutes * 60), "-i", a.audio,
+                            "-ac", "2", "-ar", "44100", str(clip)], check=True)
         ff = subprocess.Popen(
-            [str(BIN / "ffmpeg.exe"), "-hide_banner", "-loglevel", "error",
-             "-ss", str(a.start), "-t", str(a.minutes * 60), "-re", "-i", a.audio,
-             "-ac", "1", "-ar", str(SR), "-f", "s16le", "pipe:1"],
+            [str(BIN / "ffmpeg.exe"), "-hide_banner", "-loglevel", "error"] + src +
+            ["-ac", "1", "-ar", str(SR), "-f", "s16le", "pipe:1"],
             stdout=subprocess.PIPE, creationflags=GROUP | NO_WINDOW)
+        if a.device and a.play:
+            player = subprocess.Popen(
+                ["powershell", "-NoProfile", "-Command",
+                 "(New-Object System.Media.SoundPlayer '%s').PlaySync()" % clip],
+                creationflags=NO_WINDOW)
         pos = 0
         next_block = a.block_s
         vad_time = 0.0
@@ -410,7 +434,7 @@ def main() -> int:
             pos += FRAME
             if u:
                 utt_q.put(u)
-            if pos / SR >= next_block:
+            if not a.no_llm and pos / SR >= next_block:
                 block_q.put((next_block - a.block_s, next_block))
                 next_block += a.block_s
         utt_q.put(None)
@@ -456,7 +480,7 @@ def main() -> int:
         print(json.dumps({k: v for k, v in summary.items() if k != "blocks"}, indent=2))
         return 0
     finally:
-        for p in (ff, whisper, llama):
+        for p in (ff, whisper, llama, locals().get("player")):
             if p and p.poll() is None:
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
                                capture_output=True, creationflags=NO_WINDOW)
